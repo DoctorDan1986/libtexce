@@ -10,6 +10,8 @@ static void test_error_cb(void* ud, int level, const char* msg, const char* file
 
 static int g_fail = 0;
 static TeX_Renderer* g_renderer = NULL;
+static TeX_Font g_font_main;
+static TeX_Font g_font_script;
 
 static void expect(int cond, const char* msg)
 {
@@ -46,7 +48,11 @@ static void test_frac_draws_rule(void)
 {
 	char buf[] = "$\\frac{a}{bb}$";
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	TeX_Layout* L = tex_format(buf, 100, &cfg);
 	expect(L != NULL, "format returns layout");
@@ -60,7 +66,11 @@ static void test_overlay_bar_draws_line(void)
 {
 	char buf[] = "$\\bar{x}$";
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	TeX_Layout* L = tex_format(buf, 100, &cfg);
 	tex_draw_log_reset();
@@ -73,7 +83,11 @@ static void test_sqrt_head_and_bar(void)
 {
 	char buf[] = "$\\sqrt{xy}$";
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	TeX_Layout* L = tex_format(buf, 100, &cfg);
 	tex_draw_log_reset();
@@ -87,7 +101,11 @@ static void test_viewport_culling(void)
 {
 	char buf[] = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\n";
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	TeX_Layout* L = tex_format(buf, 100, &cfg);
 	expect(L != NULL, "format returns layout for culling test");
@@ -101,6 +119,12 @@ static void test_viewport_culling(void)
 
 int main(void)
 {
+	if (!tex_font_open(&g_font_main, "TeXFonts") || !tex_font_open(&g_font_script, "TeXScrpt"))
+	{
+		fprintf(stderr, "Failed to load test fonts\n");
+		return 1;
+	}
+
 	g_renderer = tex_renderer_create();
 	if (!g_renderer)
 	{

@@ -1,4 +1,3 @@
-#include <fontlibc.h>
 #include <graphx.h>
 #include <keypadc.h>
 #include <stdbool.h>
@@ -67,16 +66,14 @@ int main(void)
 	gfx_SetDrawBuffer();
 
 	// Load Fonts
-	fontlib_font_t* f_main = fontlib_GetFontByIndex("TeXFonts", 0);
-	fontlib_font_t* f_script = fontlib_GetFontByIndex("TeXScrpt", 0);
-	if (!f_main || !f_script)
+	TeX_Font font_main = { 0 };
+	TeX_Font font_script = { 0 };
+	if (!tex_font_open(&font_main, "TeXFonts") ||
+	    !tex_font_open(&font_script, "TeXScrpt"))
 	{
 		gfx_End();
 		return 1;
 	}
-
-	tex_draw_set_fonts(f_main, f_script);
-	fontlib_SetTransparency(true);
 
 	// Create one shared renderer for all messages (stateless mode)
 	TeX_Renderer* renderer = tex_renderer_create();
@@ -86,7 +83,11 @@ int main(void)
 		return 1;
 	}
 
-	TeX_Config cfg = { .color_fg = 0, .color_bg = 255, .font_pack = "TeXFonts" };
+	TeX_Config cfg = {
+		.palette = { 255, 254, 253, 0 },
+		.font_main = font_main,
+		.font_script = font_script
+	};
 
 	const int screen_w = GFX_LCD_WIDTH - 20;
 
@@ -132,7 +133,7 @@ int main(void)
 			scroll_y = max_scroll;
 
 
-		gfx_FillScreen(255);
+		gfx_FillScreen(cfg.palette[0]);
 
 		for (int i = 0; i < msg_count; i++)
 		{

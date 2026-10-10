@@ -1,25 +1,74 @@
+#!/usr/bin/env python3
+"""Build archived TXF3 AppVars: python3 tools/process_fonts.py [--outdir assets].
+
+Host requirements: Pillow and fontTools. No runtime OpenType engine or cache.
+Unmodified sources: CTAN fonts/lm/fonts/opentype/public/lm/lmroman10-regular.otf
+(Roman 2.004) and fonts/lm-math/opentype/latinmodern-math.otf (Math 1.959).
+Both use the GUST Font License (LPPL 1.3c or later); see tools/fonts licenses
+and upstream README files. The renamed TeXFonts/TeXScrpt subsets are derived
+bitmap data, not replacement OpenType fonts.
+
+TXF3: eight-byte header (magic, normal asc/desc, metric count, zero), signed
+LE16 metrics in TexFontMetric order, 312 nine-byte records (<HBBBbbbb: absolute
+bitmap offset, advance, width, height, x/y bearing, italic correction, top
+accent), then contiguous row-major 2-bit pixels, high bits first, no row
+padding. Missing entries are zero; space has only advance. Normal line bounds
+come from OS/2 typographic metrics, independent of structural/display ink.
+Slots 256..307 are italic Latin, 308 math minus, 309..311 display operators.
+"""
+
 import argparse
-import os
-import shutil
-import subprocess
-from PIL import Image
+from io import BytesIO
+from pathlib import Path
+import struct
 
-# =============================================================================
-# 1. CONFIGURATION & SYMBOL MAP
-# =============================================================================
+from fontTools.ttLib import TTFont
+from PIL import Image, ImageDraw, ImageFont
 
-# Grid Config (Universal for all our BMPs)
-CELL_SIZE = 20
-COLS = 16
-BMP_RED_LINE_Y = 15  # The row index of the red baseline in the BMP cell
+ROOT_DIR = Path(__file__).resolve().parent.parent
+FONT_DIR = Path(__file__).resolve().parent / "fonts"
+GLYPH_COUNT = 312
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(TOOLS_DIR)
+# Keep in the same order as TexFontMetric. None denotes the raster em itself.
+METRICS = [
+    None,
+    "AxisHeight",
+    "SuperscriptShiftUp",
+    "SuperscriptShiftUpCramped",
+    "SuperscriptBottomMin",
+    "SuperscriptBaselineDropMax",
+    "SubscriptShiftDown",
+    "SubscriptTopMax",
+    "SubscriptBaselineDropMin",
+    "SubSuperscriptGapMin",
+    "SuperscriptBottomMaxWithSubscript",
+    "SpaceAfterScript",
+    "UpperLimitGapMin",
+    "UpperLimitBaselineRiseMin",
+    "LowerLimitGapMin",
+    "LowerLimitBaselineDropMin",
+    "FractionNumeratorShiftUp",
+    "FractionDenominatorShiftDown",
+    "FractionNumeratorDisplayStyleShiftUp",
+    "FractionDenominatorDisplayStyleShiftDown",
+    "FractionNumeratorGapMin",
+    "FractionDenominatorGapMin",
+    "FractionNumDisplayStyleGapMin",
+    "FractionDenomDisplayStyleGapMin",
+    "FractionRuleThickness",
+    "RadicalVerticalGap",
+    "RadicalDisplayStyleVerticalGap",
+    "RadicalRuleThickness",
+    "RadicalExtraAscender",
+    "RadicalKernBeforeDegree",
+    "RadicalKernAfterDegree",
+    "RadicalDegreeBottomRaisePercent",
+]
+HEADER_SIZE = 8 + 2 * len(METRICS)
+BITMAP_START = HEADER_SIZE + GLYPH_COUNT * 9
 
-# Low-Index Math Symbols (0x01 - 0x10)
-# These replace the old cursor definitions
+# Low-Index Math Symbols (0x01 - 0x10); byte positions are part of the API.
 LOW_SYMBOLS = [
-    # Position 0x01-0x10 (indices 1-16)
     0x222A,  # ∪ Union
     0x2229,  # ∩ Intersection
     0x2209,  # ∉ Not element of (notin)
@@ -38,7 +87,7 @@ LOW_SYMBOLS = [
     0x2295,  # ⊕ Circled plus (oplus)
 ]
 
-# The Master Symbol List (0x80 - 0xBC)
+# The Master Symbol List (0x80 - 0xBC), unchanged from the bitmap fonts.
 SYMBOLS = [
     # Greek Lower
     0x03B1, 0x03B2, 0x03B3, 0x03B4, 0x03B5, 0x03B6, 0x03B7, 0x03B8,
@@ -57,305 +106,318 @@ SYMBOLS = [
     # Logic/Sets
     0x2208, 0x2282, 0x2234, 0x27E8, 0x27E9,
     # Structural
-    0x221A
+    0x221A,
 ]
 
-# Font Profiles
-PROFILES = {
-    "main": {
-        "bmp": os.path.join(TOOLS_DIR, "tex_guide_16px.bmp"),
-        "out_txt": os.path.join(TOOLS_DIR, "tex_main.txt"),
-        "bin": os.path.join(TOOLS_DIR, "tex_main.bin"),
-        "pack_name": "TeXFonts",
-        "display_name": "TeX Main",
-        "description": "Main 16px Math Font",
-        "convfont_args": ["-w", "normal", "-s", "sans-serif"],
-        "height": 16,
-        "baseline": 13, # Pixel 13 is the baseline
-        "padding": 1    # Add 1px space to right
-    },
-    "script": {
-        "bmp": os.path.join(TOOLS_DIR, "tex_script_12px_guided.bmp"),
-        "out_txt": os.path.join(TOOLS_DIR, "tex_script.txt"),
-        "bin": os.path.join(TOOLS_DIR, "tex_script.bin"),
-        "pack_name": "TeXScrpt",
-        "display_name": "TeX Script",
-        "description": "Script 12px Math Font",
-        "convfont_args": ["-w", "normal"],
-        "height": 12,
-        "baseline": 10, # Pixel 10 is the baseline
-        "padding": 1    # Add 1px space to right
-    }
-}
 
-# =============================================================================
-# 2. CORE LOGIC: EXTRACT GLYPH & METRICS
-# =============================================================================
+def shade(value):
+    """Four-level coverage with FlowCE's small-text antialiasing curve."""
+    alpha = value / 255.0
+    if alpha < 0.14:
+        return 0
 
-def extract_glyph(img, cell_x, cell_y, profile):
-    font_h = profile["height"]
-    base_off = profile["baseline"]
-    padding = profile["padding"]
-    
-    # Calculate Y alignment
-    # We align the Font's logical baseline to the BMP's visual Red Line (Row 15)
-    start_y = cell_y + (BMP_RED_LINE_Y - base_off)
-    
-    pixels = set()
-    min_x = CELL_SIZE
-    max_x = -1
-    
-    # Scan the defined font height area
-    for row in range(font_h):
-        bmp_y = start_y + row
-        for x in range(CELL_SIZE):
-            bmp_x = cell_x + x
-            
-            # Safety check
-            if bmp_x >= img.width or bmp_y >= img.height: continue
-            
-            px = img.getpixel((bmp_x, bmp_y))
-            
-            # STRICT WHITE CHECK
-            # We ignore Cyan (guides), Red (baseline), Gray (grid), Black (bg)
-            is_white = False
-            if isinstance(px, int): is_white = (px == 1) # Palette index 1
-            elif isinstance(px, tuple): is_white = (px == (255,255,255))
-            
-            if is_white:
-                pixels.add((x, row))
-                if x < min_x: min_x = x
-                if x > max_x: max_x = x
-                
-    # Handle Empty Glyph (Space)
-    if not pixels:
-        final_w = 4 # Default space width
-        return final_w, [" " * final_w] * font_h
-        
-    # Calculate Width + Padding
-    content_w = (max_x - min_x) + 1
-    final_w = content_w + padding
-    
-    # Build String Rows
-    output_rows = []
-    for row in range(font_h):
-        row_str = ""
-        # Draw pixels
-        for x in range(content_w):
-            if (min_x + x, row) in pixels:
-                row_str += "#"
+    alpha **= 0.8
+    if alpha < 0.42:
+        return 1
+    if alpha < 0.8:
+        return 2
+    return 3
+
+
+def raster(font, text):
+    """Return advance, tight ink box, and packed pixels; bearings use baseline."""
+    advance = round(font.getlength(text))
+    left, top, right, bottom = font.getbbox(text, anchor="ls")
+    if right <= left or bottom <= top:
+        if text != " ":
+            raise ValueError(f"Empty required glyph: {text!r}")
+        return advance, 0, 0, 0, 0, b""
+
+    image = Image.new("L", (right - left, bottom - top))
+    ImageDraw.Draw(image).text((-left, -top), text, font=font, fill=255, anchor="ls")
+    image = image.point([shade(value) for value in range(256)])
+    bounds = image.getbbox()
+    if bounds is None:
+        raise ValueError(f"Required glyph lost during quantization: {text!r}")
+
+    crop_left, crop_top, crop_right, crop_bottom = bounds
+    pixels = image.crop(bounds).tobytes()
+    packed = bytearray((len(pixels) + 3) // 4)
+    for index, value in enumerate(pixels):
+        packed[index // 4] |= value << (6 - 2 * (index % 4))
+
+    return (
+        advance,
+        crop_right - crop_left,
+        crop_bottom - crop_top,
+        left + crop_left,
+        top + crop_top,
+        bytes(packed),
+    )
+
+
+def scaled(value, size, em, upward=False):
+    """Nearest pixel, ties away from zero; minima and rules round upward."""
+    product = value * size
+    if upward:
+        return -(-product // em)
+
+    if product >= 0:
+        sign = 1
+    else:
+        sign = -1
+    return sign * ((abs(product) * 2 + em) // (2 * em))
+
+
+def build_payload(size):
+    with TTFont(FONT_DIR / "lmroman10-regular.otf") as text_metadata, \
+            TTFont(FONT_DIR / "latinmodern-math.otf") as math_metadata:
+        math_cmap = math_metadata.getBestCmap()
+        text_cmap = text_metadata.getBestCmap()
+        math_table = math_metadata["MATH"].table
+        math_em = math_metadata["head"].unitsPerEm
+
+        metric_values = []
+        for metric_name in METRICS:
+            if metric_name is None:
+                value = size
             else:
-                row_str += " "
-        # Add padding spaces
-        row_str += " " * padding
-        output_rows.append(row_str)
-        
-    return final_w, output_rows
+                raw_value = getattr(math_table.MathConstants, metric_name)
+                raw_value = getattr(raw_value, "Value", raw_value)
+                if metric_name.endswith("Percent"):
+                    value = raw_value
+                else:
+                    value = scaled(
+                        raw_value,
+                        size,
+                        math_em,
+                        metric_name.endswith(("Min", "Thickness", "VerticalGap")),
+                    )
+            metric_values.append(value)
 
-def get_math_axis_height(img, cell_x, cell_y, profile):
-    """
-    Scans a specific glyph (usually '+') to find its visual vertical center.
-    Returns the distance (in pixels) from the baseline to that center.
-    """
-    font_h = profile["height"]
-    base_off = profile["baseline"]
-    
-    # Calculate Y alignment logic identical to extract_glyph
-    start_y = cell_y + (BMP_RED_LINE_Y - base_off)
-    
-    min_y = font_h  # Initialize outside bounds
-    max_y = -1
-    found_pixels = False
+        italic_info = math_table.MathGlyphInfo.MathItalicsCorrectionInfo
+        italic_corrections = dict(zip(
+            italic_info.Coverage.glyphs,
+            (correction.Value for correction in italic_info.ItalicsCorrection),
+        ))
+        accent_info = math_table.MathGlyphInfo.MathTopAccentAttachment
+        accent_attachments = dict(zip(
+            accent_info.TopAccentCoverage.glyphs,
+            (attachment.Value for attachment in accent_info.TopAccentAttachment),
+        ))
 
-    # Scan the target glyph area
-    for row in range(font_h):
-        bmp_y = start_y + row
-        for x in range(CELL_SIZE):
-            bmp_x = cell_x + x
-            if bmp_x >= img.width or bmp_y >= img.height: continue
-            
-            px = img.getpixel((bmp_x, bmp_y))
-            
-            # Use same strict white detection
-            is_white = False
-            if isinstance(px, int): is_white = (px == 1)
-            elif isinstance(px, tuple): is_white = (px == (255,255,255))
-            
-            if is_white:
-                if row < min_y: min_y = row
-                if row > max_y: max_y = row
-                found_pixels = True
+        # Explicit source selection: never substitute a missing required glyph.
+        mapping = {codepoint: (0, text_cmap[codepoint]) for codepoint in range(32, 127)}
+        mapping[127] = (0, None)  # The byte API's visible DEL label.
+        for codepoint in map(ord, "+=<>|"):
+            mapping[codepoint] = (1, math_cmap[codepoint])
+        mapping.update(
+            (index + 1, (1, math_cmap[codepoint]))
+            for index, codepoint in enumerate(LOW_SYMBOLS)
+        )
 
-    if not found_pixels:
-        print("    Warning: Math axis reference glyph is empty. Using heuristic.")
-        return int(font_h / 2)
+        for index, codepoint in enumerate(SYMBOLS):
+            # Mathematical italic Greek follows the Unicode lowercase sequence,
+            # including the final-sigma hole; uppercase Greek stays upright.
+            if index < 24:
+                codepoint = 0x1D6FC + codepoint - 0x03B1
+            mapping[128 + index] = (1, math_cmap[codepoint])
 
-    # Calculate visual center row relative to the top of the glyph box
-    center_y = (min_y + max_y) / 2.0
-    
-    # Math Axis = Distance from Baseline to Center
-    # Since 'row' increases downwards, and baseline is at 'base_off' (e.g., 13):
-    # If center is at row 6, axis = 13 - 6 = 7.
-    axis_height = base_off - center_y
-    
-    return int(round(axis_height))
+        for index in range(52):
+            if index < 26:
+                codepoint = 0x1D434 + index
+            else:
+                codepoint = 0x1D44E + index - 26
+            if codepoint == 0x1D455:  # Unicode reserves italic h at Planck constant.
+                codepoint = 0x210E
+            mapping[256 + index] = (1, math_cmap[codepoint])
 
-# =============================================================================
-# 3. OPERATION: EXPORT TO TXT (For convfont)
-# =============================================================================
+        mapping[308] = (1, math_cmap[0x2212])
+        variants = math_table.MathVariants
+        for index, codepoint in enumerate((0x222B, 0x2211, 0x220F)):
+            glyph = math_cmap[codepoint]
+            construction = variants.VertGlyphConstruction[
+                variants.VertGlyphCoverage.glyphs.index(glyph)
+            ]
+            minimum_height = math_table.MathConstants.DisplayOperatorMinHeight
+            candidates = [
+                variant
+                for variant in construction.MathGlyphVariantRecord
+                if variant.AdvanceMeasurement >= minimum_height
+            ]
+            if not candidates:
+                raise ValueError(
+                    f"No display variant meets MATH minimum: U+{codepoint:04X}"
+                )
+            chosen_variant = min(
+                candidates, key=lambda variant: variant.AdvanceMeasurement
+            )
+            mapping[309 + index] = (1, chosen_variant.VariantGlyph)
 
-def perform_export():
-    print("--- STARTING EXPORT ---")
-    
-    for key, p in PROFILES.items():
-        print(f"Processing Profile: {key.upper()}...")
-        img = Image.open(p["bmp"])
-            
-        font_h = p["height"]
-        
-        # --- CALCULATE DYNAMIC MATH AXIS ---
-        # We use the '+' symbol (ASCII 43) as the reference for the math axis.
-        plus_idx = 43
-        p_cell_x = (plus_idx % COLS) * CELL_SIZE
-        p_cell_y = (plus_idx // COLS) * CELL_SIZE
-        
-        math_axis = get_math_axis_height(img, p_cell_x, p_cell_y, p)
-        print(f"  [Calculated] Math Axis (based on '+'): {math_axis}px from baseline")
-        # -----------------------------------
+        # FreeType accepts characters, not glyph IDs. An in-memory cmap exposes
+        # the selected CFF glyphs without changing outlines, scale, or bearings.
+        fonts = []
+        for face_index, metadata in enumerate((text_metadata, math_metadata)):
+            remap = {
+                0xE000 + slot: glyph
+                for slot, (source_index, glyph) in mapping.items()
+                if source_index == face_index and glyph is not None
+            }
+            for table in metadata["cmap"].tables:
+                if table.isUnicode():
+                    table.cmap.update(remap)
 
-        with open(p["out_txt"], "w", encoding="utf-8") as f:
-            # Write Header
-            f.write("convfont\n")
-            f.write(f": Generated from {p['bmp']}\n")
-            f.write(f"Height: {font_h}\n")
-            f.write("Double width: false\n")
-            f.write("Code page: Win-1252\n")
-            f.write(f"Baseline: {p['baseline']}\n")
-            f.write(f"Cap height: {int(font_h * 0.7)}\n")
-            f.write(f"x-height: {math_axis}\n")
-            f.write("Space above: 0\n")
-            f.write("Space below: 0\n")
-            f.write("Font Data:\n")
-            
-            def write_entry(idx, uni_cp, cell_x, cell_y):
-                w, data = extract_glyph(img, cell_x, cell_y, p)
-                f.write(f"Code point: {idx}\n")
-                if idx == 32: f.write("Name: Space\n")
-                elif uni_cp: f.write(f"Unicode: U+{uni_cp:08X}\n")
-                f.write(f"Width: {w}\nData:\n")
-                for row in data: f.write(row + "\n")
-                f.write("\n")
+            font_buffer = BytesIO()
+            metadata.save(font_buffer)
+            font_buffer.seek(0)
+            fonts.append(ImageFont.truetype(
+                font_buffer, size, layout_engine=ImageFont.Layout.BASIC
+            ))
 
-            # 0. Low-index math symbols (0x01-0x10)
-            for i, uni_cp in enumerate(LOW_SYMBOLS):
-                idx = 1 + i  # Start at position 1
-                write_entry(idx, uni_cp, (idx % COLS) * CELL_SIZE, (idx // COLS) * CELL_SIZE)
+        records = bytearray(GLYPH_COUNT * 9)
+        bitmaps = bytearray()
+        ascender = scaled(
+            text_metadata["OS/2"].sTypoAscender,
+            size,
+            text_metadata["head"].unitsPerEm,
+            upward=True,
+        )
+        descender = scaled(
+            -text_metadata["OS/2"].sTypoDescender,
+            size,
+            text_metadata["head"].unitsPerEm,
+            upward=True,
+        )
 
-            # 0.5. Fill Gap (0x11 - 0x1F) with empty glyphs to satisfy convfont
-            # These are currently unused in the font definition
-            for idx in range(17, 32):
-                f.write(f"Code point: {idx}\n")
-                f.write("Width: 4\n") # Standard empty width
-                f.write("Data:\n")
-                # Write blank rows matching the current profile height
-                blank_row = "    " # 4 spaces
-                for _ in range(font_h):
-                    f.write(blank_row + "\n")
-                f.write("\n")
+        for slot, (face_index, glyph) in sorted(mapping.items()):
+            if slot == 127:
+                text = "DEL"
+            elif slot == 32:
+                text = " "
+            else:
+                text = chr(0xE000 + slot)
+            advance, width, height, x_bearing, y_bearing, bitmap = raster(
+                fonts[face_index], text
+            )
 
-            # 1. ASCII 32-127
-            for cp in range(32, 128):
-                write_entry(cp, cp, (cp % COLS) * CELL_SIZE, (cp // COLS) * CELL_SIZE)
+            # OpenType MATH defaults: absent italic correction is zero; absent
+            # top attachment is half advance. Roman has no MATH table.
+            if face_index:
+                italic_correction = scaled(
+                    italic_corrections.get(glyph, 0), size, math_em
+                )
+            else:
+                italic_correction = 0
 
-            # 2. Custom Symbols 128+
-            for i, uni_cp in enumerate(SYMBOLS):
-                idx = 128 + i
-                write_entry(idx, uni_cp, (idx % COLS) * CELL_SIZE, (idx // COLS) * CELL_SIZE)
-        
-        print(f"  -> Wrote {p['out_txt']}")
-    print("--- EXPORT COMPLETE ---")
+            source_metadata = math_metadata if face_index else text_metadata
+            source_em = source_metadata["head"].unitsPerEm
+            if face_index and glyph in accent_attachments:
+                top_attachment = scaled(accent_attachments[glyph], size, math_em)
+            elif glyph is not None:
+                top_attachment = scaled(
+                    source_metadata["hmtx"][glyph][0], size, 2 * source_em
+                )
+            else:
+                top_attachment = (advance + 1) // 2
 
-# =============================================================================
-# 4. OPERATION: BUILD 8XV
-# =============================================================================
+            if not bitmap:
+                italic_correction = 0
+                top_attachment = 0
 
-def require_tool(name):
-    if shutil.which(name) is None:
-        raise SystemExit(f"Error: Required tool '{name}' not found in PATH.")
+            if (
+                not 0 < advance <= 255
+                or width > 255
+                or height > 255
+            ):
+                raise ValueError(f"Out-of-range glyph metrics for slot {slot}")
+            if not all(
+                -128 <= value <= 127
+                for value in (x_bearing, y_bearing, italic_correction, top_attachment)
+            ):
+                raise ValueError(
+                    f"Out-of-range glyph attachment/bearing for slot {slot}"
+                )
 
-def run_cmd(args):
-    print(f"Running: {' '.join(args)}")
-    subprocess.run(args, check=True)
+            offset = BITMAP_START + len(bitmaps) if bitmap else 0
+            struct.pack_into(
+                "<HBBBbbbb",
+                records,
+                slot * 9,
+                offset,
+                advance,
+                width,
+                height,
+                x_bearing,
+                y_bearing,
+                italic_correction,
+                top_attachment,
+            )
+            bitmaps.extend(bitmap)
 
-def perform_build(outdir, keep_bin):
-    require_tool("convfont")
-    require_tool("convbin")
+        if (
+            not 0 < ascender <= 255
+            or not 0 <= descender <= 255
+            or not 0 <= metric_values[1] <= ascender
+        ):
+            raise ValueError("Out-of-range face metrics")
 
-    if not os.path.isabs(outdir):
-        outdir = os.path.join(ROOT_DIR, outdir)
+        payload = (
+            b"TXF3"
+            + bytes((ascender, descender, len(METRICS), 0))
+            + struct.pack(f"<{len(metric_values)}h", *metric_values)
+            + records
+            + bitmaps
+        )
+        if len(payload) > 65512:
+            raise ValueError("Font exceeds the AppVar payload limit")
+        return payload, len(mapping), ascender, descender, metric_values[1]
 
-    os.makedirs(outdir, exist_ok=True)
 
-    for key, p in PROFILES.items():
-        print(f"Building Pack: {key.upper()}...")
-        convfont_cmd = [
-            "convfont",
-            "-o", "fontpack",
-            "-N", p["display_name"],
-            "-P", "Win-1252",
-            "-D", p["description"],
-            "-t", p["out_txt"],
-            "-a", "0",
-        ] + p["convfont_args"] + [p["bin"]]
-        run_cmd(convfont_cmd)
+def appvar(name, payload):
+    """Standard TI-83F container, AppVar type 0x15, archived flag 0x80."""
+    data = struct.pack("<H", len(payload)) + payload
+    entry = struct.pack(
+        "<HHB8sBBH", 13, len(data), 0x15,
+        name.encode("ascii"), 0, 0x80, len(data),
+    ) + data
+    comment = b"libtexce TXF3 / Latin Modern / GUST".ljust(42, b"\0")
 
-        out_path = os.path.join(outdir, f"{p['pack_name']}.8xv")
-        convbin_cmd = [
-            "convbin",
-            "-r",
-            "-k", "8xv",
-            "-n", p["pack_name"],
-            "-i", p["bin"],
-            "-o", out_path,
-        ]
-        run_cmd(convbin_cmd)
+    return (
+        b"**TI83F*\x1a\x0a\x00"
+        + comment
+        + struct.pack("<H", len(entry))
+        + entry
+        + struct.pack("<H", sum(entry) & 0xFFFF)
+    )
 
-        if not keep_bin:
-            os.remove(p["bin"])
 
-        print(f"  -> Wrote {out_path}")
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--outdir",
+        type=Path,
+        default=ROOT_DIR / "assets",
+        help="Output directory (default: repository assets)",
+    )
+    args = parser.parse_args()
+    args.outdir.mkdir(parents=True, exist_ok=True)
 
-    print("--- BUILD COMPLETE ---")
+    with TTFont(FONT_DIR / "latinmodern-math.otf") as math_metadata:
+        script_percent = math_metadata["MATH"].table.MathConstants.ScriptPercentScaleDown
+    # Explicit half-up rounding: Latin Modern's 70% turns 16px into 11px.
+    script_size = (16 * script_percent + 50) // 100
 
-# =============================================================================
-# 5. CLI INTERFACE
-# =============================================================================
+    for name, size in (("TeXFonts", 16), ("TeXScrpt", script_size)):
+        payload, glyph_count, ascender, descender, axis_height = build_payload(size)
+        container = appvar(name, payload)
+        output_path = args.outdir / f"{name}.8xv"
+        output_path.write_bytes(container)
+        print(
+            f"{output_path}: {size}px, {glyph_count} glyphs, "
+            f"asc={ascender} desc={descender} axis={axis_height}, "
+            f"{len(payload)} payload bytes / {len(container)} file bytes, archived"
+        )
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TeX Font Build Tool")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    
-    # Command: Export
-    parser_exp = subparsers.add_parser("export", help="Convert BMPs to .txt for convfont")
-    
-    # Command: Build
-    parser_build = subparsers.add_parser("build", help="Convert .txt to .8xv using convfont/convbin")
-    parser_build.add_argument("--outdir", default="assets", help="Output directory for .8xv files")
-    parser_build.add_argument("--keep-bin", action="store_true", help="Keep intermediate .bin files")
-
-    # Command: Export + Build
-    parser_all = subparsers.add_parser("all", help="Export then build")
-    parser_all.add_argument("--outdir", default="assets", help="Output directory for .8xv files")
-    parser_all.add_argument("--keep-bin", action="store_true", help="Keep intermediate .bin files")
-
-    args = parser.parse_args()
-    
-    if args.command == "export":
-        perform_export()
-
-    elif args.command == "build":
-        perform_build(args.outdir, args.keep_bin)
-
-    elif args.command == "all":
-        perform_export()
-        perform_build(args.outdir, args.keep_bin)
+    main()

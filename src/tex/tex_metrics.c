@@ -1,196 +1,131 @@
 #include "tex_metrics.h"
-#include <limits.h>
-#include <string.h>
-#include "tex_fonts.h"
-#include <fontlibc.h>
-
-typedef struct
-{
-	int16_t main_asc, main_desc;
-	int16_t script_asc, script_desc;
-	fontlib_font_t* mf;
-	fontlib_font_t* sf;
-	int use_fontlib;
-} TexMetricsState;
-
-static TexMetricsState g_state;
-
-FontRole g_tex_metrics_current_role = (FontRole)-1;
-
-void tex_metrics_reset(void)
-{
-	memset(&g_state, 0, sizeof(g_state));
-	g_state.use_fontlib = 0;
-	g_tex_metrics_current_role = (FontRole)-1; // force first SetFont
-}
-
-int16_t tex_metrics_math_axis(void)
-{
-	return g_state.mf ? (int16_t)g_state.mf->x_height : 0;
-}
-
 #include "tex_internal.h"
+#include "tex_util.h"
+#include <limits.h>
+
+static TexFontHandles g_fonts;
+
+static void tex_reserved_init(void);
+
+TeX_Font tex_metrics_font(FontRole role)
+{
+	return role == FONTROLE_SCRIPT ? g_fonts.script_font : g_fonts.main_font;
+}
+
+void tex_metrics_activate(const TexFontHandles* fonts)
+{
+	if (!fonts)
+	{
+		g_fonts = (TexFontHandles){ 0 };
+		return;
+	}
+
+	int changed = g_fonts.main_font.data != fonts->main_font.data ||
+	    g_fonts.script_font.data != fonts->script_font.data;
+	g_fonts = *fonts;
+
+	if (changed)
+		tex_reserved_init();
+}
+
 void tex_metrics_init(struct TeX_Layout* layout)
 {
-	tex_metrics_reset();
-	TexFontHandles fh;
-
-	const char* pack_main = layout ? layout->cfg.pack : NULL;
-
-	int result = tex_fonts_load(pack_main, NULL, &fh);
-
-	if (result)
+	TeX_Font main = layout->cfg.font_main;
+	TeX_Font script = layout->cfg.font_script;
+	if (!main.data || !script.data)
 	{
-		g_state.main_asc = (int16_t)fh.main_baseline;
-		g_state.main_desc = (int16_t)(fh.main_height - fh.main_baseline);
-		g_state.script_asc = (int16_t)fh.script_baseline;
-		g_state.script_desc = (int16_t)(fh.script_height - fh.script_baseline);
-		g_state.mf = (fontlib_font_t*)fh.main_font;
-		g_state.sf = (fontlib_font_t*)fh.script_font;
-		g_state.use_fontlib = 1;
-		g_tex_metrics_current_role = (FontRole)-1; // reset cache after (re)load
-		tex_reserved_init();
+		tex_metrics_activate(NULL);
+		TEX_SET_ERROR(layout, TEX_ERR_FONT, "Invalid font handles", 0);
+		return;
 	}
-	else
-	{
-		if (layout)
-		{
-			TEX_SET_ERROR(layout, TEX_ERR_FONT, "Failed to load fonts", 0);
-		}
-	}
+
+	layout->fonts.main_font = main;
+	layout->fonts.script_font = script;
+	tex_metrics_activate(&layout->fonts);
 }
+
 
 int16_t tex_metrics_asc(FontRole role)
 {
-	return (int16_t)((role == FONTROLE_SCRIPT) ? g_state.script_asc : g_state.main_asc);
+	return tex_font_asc(tex_metrics_font(role));
 }
 
 int16_t tex_metrics_desc(FontRole role)
 {
-	return (int16_t)((role == FONTROLE_SCRIPT) ? g_state.script_desc : g_state.main_desc);
+	return tex_font_desc(tex_metrics_font(role));
 }
 
-
-int16_t tex_metrics_text_width(const char* s, FontRole role)
+TexTextMetrics tex_metrics_text(const char* s, int len, FontRole role)
 {
-	if (g_state.use_fontlib && g_state.mf && g_state.sf)
+	TexTextMetrics metrics = { 0 };
+	TeX_Font font = tex_metrics_font(role);
+
+	for (int i = 0; i < len; ++i)
 	{
-		// ensure font is active (cached)
-		if (((role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf) == NULL)
+		TexGlyph glyph;
+		if (tex_font_glyph(font, (uint8_t)s[i], &glyph))
 		{
-			return 0;
+			metrics.w = (int16_t)TEX_MIN(INT16_MAX, metrics.w + glyph.advance);
+			metrics.asc = (int16_t)TEX_MAX(metrics.asc, -glyph.y_offset);
+			metrics.desc = (int16_t)TEX_MAX(metrics.desc, glyph.y_offset + glyph.height);
 		}
-		if (g_tex_metrics_current_role != role)
-		{
-			fontlib_font_t* font = (role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf;
-#if defined(__TICE__)
-			if (!fontlib_SetFont(font, (fontlib_load_options_t)0))
-			{
-				return 0;
-			}
-#else
-			fontlib_SetFont(font, (fontlib_load_options_t)0);
-#endif
-			g_tex_metrics_current_role = role;
-		}
-		return (int16_t)fontlib_GetStringWidth(s ? s : "");
 	}
-	(void)s;
-	(void)role;
-	return 0;
+
+	return metrics;
 }
 
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-int16_t tex_metrics_text_width_n(const char* s, int len, FontRole role)
+bool tex_metrics_glyph(const Node* node, TexGlyph* glyph)
 {
-	if (g_state.use_fontlib && g_state.mf && g_state.sf)
-	{
-		if (((role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf) == NULL)
-			return 0;
-		if (g_tex_metrics_current_role != role)
-		{
-			fontlib_font_t* font = (role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf;
-			if (!fontlib_SetFont(font, (fontlib_load_options_t)0))
-				return 0;
-			fontlib_SetFont(font, (fontlib_load_options_t)0);
-			g_tex_metrics_current_role = role;
-		}
-		if (!s || len <= 0)
-			return 0;
+	FontRole role = (node->flags & TEX_FLAG_SCRIPT) ? FONTROLE_SCRIPT : FONTROLE_MAIN;
+	uint8_t code = node->type == N_MULTIOP ? (uint8_t)TEXFONT_INTEGRAL_CHAR : (uint8_t)node->data.glyph;
 
-
-		return (int16_t)fontlib_GetStringWidthL(s, (size_t)len);
-	}
-	(void)role;
-	(void)s;
-	(void)len;
-	return 0;
+	return tex_font_glyph(tex_metrics_font(role),
+	                      tex_font_math_code(code, (node->flags & TEX_FLAG_MATHF_DISPLAY) != 0), glyph);
 }
 
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-int16_t tex_metrics_glyph_width(unsigned int glyph, FontRole role)
+void tex_metrics_measure_glyph(Node* node)
 {
-	if (g_state.use_fontlib && g_state.mf && g_state.sf)
+	TexGlyph glyph;
+	node->w = 0;
+	node->asc = 0;
+	node->desc = 0;
+
+	if (tex_metrics_glyph(node, &glyph))
 	{
-		char ch[2];
-		ch[0] = (char)(glyph & 0xFF);
-		ch[1] = '\0';
-
-		if (((role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf) == NULL)
-			return 0;
-
-		if (g_tex_metrics_current_role != role)
-		{
-			fontlib_font_t* font = (role == FONTROLE_SCRIPT) ? g_state.sf : g_state.mf;
-			fontlib_SetFont(font, (fontlib_load_options_t)0);
-
-			g_tex_metrics_current_role = role;
-		}
-
-		// HACK: set threshold to 1
-		char old_first = fontlib_GetFirstPrintableCodePoint();
-		fontlib_SetFirstPrintableCodePoint((char)0x01);
-
-		int16_t result = (int16_t)fontlib_GetStringWidth(ch);
-		fontlib_SetFirstPrintableCodePoint(old_first);
-		return result;
+		node->w = (int16_t)(glyph.advance + glyph.italic_correction);
+		node->asc = (int16_t)TEX_MAX(0, -glyph.y_offset);
+		node->desc = (int16_t)TEX_MAX(0, glyph.y_offset + glyph.height);
 	}
-	(void)glyph;
-	(void)role;
-	return 0;
 }
+
 
 Node g_reserved_nodes[TEX_RESERVED_COUNT];
 
-void tex_reserved_init(void)
+static void tex_reserved_init(void)
 {
 	// main role glyphs (0-127)
 	for (int i = 0; i < 128; i++)
 	{
-		Node* n = &g_reserved_nodes[i];
-		n->type = N_GLYPH;
-		n->flags = 0;
-		n->data.glyph = (uint16_t)i;
+		Node* node = &g_reserved_nodes[i];
+		node->type = N_GLYPH;
+		node->flags = 0;
+		node->data.glyph = (uint16_t)i;
 
-		n->w = tex_metrics_glyph_width((unsigned int)i, FONTROLE_MAIN);
-		n->asc = tex_metrics_asc(FONTROLE_MAIN);
-		n->desc = tex_metrics_desc(FONTROLE_MAIN);
+		tex_metrics_measure_glyph(node);
 	}
 
 	// script role glyphs (128-255)
 	for (int i = 128; i < TEX_RESERVED_COUNT; i++)
 	{
-		Node* n = &g_reserved_nodes[i];
-		n->type = N_GLYPH;
-		n->flags = TEX_FLAG_SCRIPT;
+		Node* node = &g_reserved_nodes[i];
+		node->type = N_GLYPH;
+		node->flags = TEX_FLAG_SCRIPT;
 
 		// back to ASCII (e.g., 128 -> 0) for the actual glyph code
 		uint16_t ascii_code = (uint16_t)(i - 128);
-		n->data.glyph = ascii_code;
+		node->data.glyph = ascii_code;
 
-		n->w = tex_metrics_glyph_width((unsigned int)ascii_code, FONTROLE_SCRIPT);
-		n->asc = tex_metrics_asc(FONTROLE_SCRIPT);
-		n->desc = tex_metrics_desc(FONTROLE_SCRIPT);
+		tex_metrics_measure_glyph(node);
 	}
 }
 

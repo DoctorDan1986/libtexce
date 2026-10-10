@@ -1,4 +1,4 @@
-#include <assert.h>
+#include "test_check.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,7 +66,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("$x$", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 2, "math inline token count >= 2 (incl EOF)");
 		assert_true(toks[0].type == T_MATH_INLINE, "inline math token type");
 		assert_true(str_eq_token(&toks[0], "x"), "inline math payload 'x'");
@@ -78,7 +79,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("$$x^2$$ text", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 4, "display math token count >= 4");
 		assert_true(toks[0].type == T_MATH_DISPLAY, "display math token type");
 		assert_true(str_eq_token(&toks[0], "x^2"), "display math payload 'x^2'");
@@ -91,7 +93,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("a b\nc", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 6, "text+space+newline token count >=6");
 		assert_true(toks[0].type == T_TEXT && str_eq_token(&toks[0], "a"), "first word 'a'");
 		assert_true(toks[1].type == T_SPACE, "space token");
@@ -105,7 +108,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("$unclosed", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 2, "unclosed math fallback count >=2");
 		assert_true(toks[0].type == T_TEXT && str_eq_token(&toks[0], "$unclosed"), "fallback as single text token");
 		free(toks);
@@ -116,7 +120,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("$\\$\\{\\}$", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 2, "math verbatim token count >=2");
 		assert_true(toks[0].type == T_MATH_INLINE, "inline math token for escapes");
 		assert_true(str_eq_token(&toks[0], "\\$\\{\\}"), "payload verbatim (math parser handles escapes)");
@@ -127,7 +132,8 @@ int main(void)
 	{
 		TeX_Token* toks = NULL;
 		int n = collect_tokens("price\\$100", &toks, &pool);
-		assert(toks && "collect_tokens should return valid token array");
+		CHECK(toks && "collect_tokens should return valid token array");
+
 		assert_true(n >= 2, "text escape token count >=2");
 		assert_true(toks[0].type == T_TEXT && str_eq_token(&toks[0], "price$100"), "text escape $ handled");
 		free(toks);

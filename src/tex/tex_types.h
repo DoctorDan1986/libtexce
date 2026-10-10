@@ -1,7 +1,10 @@
 #ifndef TEX_TEX_TYPES_H
 #define TEX_TEX_TYPES_H
 
+#include <stdbool.h>
 #include <stdint.h>
+
+#include "tex_fonts.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,9 +45,16 @@ typedef void (*TeX_ErrorLogFn)(void* userdata, int level, const char* msg, const
 // ================================
 typedef struct
 {
-	uint8_t color_fg;
-	uint8_t color_bg;
-	const char* font_pack;
+	// Background, 1/3 ink, 2/3 ink, foreground palette indices, all distinct.
+	// Drawing owns the two intermediate entries; the caller supplies endpoint colors.
+	uint8_t palette[4];
+
+	bool justify;
+
+	// Validated views; the underlying font data must stay unchanged and stationary.
+	TeX_Font font_main;
+	TeX_Font font_script;
+
 	TeX_ErrorLogFn error_callback;
 	void* error_userdata;
 } TeX_Config;

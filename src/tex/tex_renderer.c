@@ -16,11 +16,6 @@ TeX_Renderer* tex_renderer_create_sized(size_t slab_size)
 		return NULL;
 	}
 
-	r->line_count = 0;
-	r->window_y_start = 0;
-	r->window_y_end = 0;
-	r->cached_layout = NULL;
-
 	return r;
 }
 
@@ -29,14 +24,18 @@ void tex_renderer_destroy(TeX_Renderer* r)
 	if (!r)
 		return;
 
+	tex_renderer_invalidate(r);
+
 	pool_free(&r->pool);
 	free(r);
 }
 
 void tex_renderer_invalidate(TeX_Renderer* r)
 {
-	if (!r)
-		return;
+	if (r->cached_layout)
+	{
+		r->cached_layout->renderer = NULL;
+	}
 
 	pool_reset(&r->pool);
 	r->line_count = 0;

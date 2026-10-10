@@ -18,8 +18,8 @@ EXTRA_C_SOURCES = \
     $(TEX_ROOT)/src/tex/tex_util.c \
     $(TEX_ROOT)/src/tex/tex_pool.c \
     $(TEX_ROOT)/src/tex/tex_symbols.c \
-    $(TEX_ROOT)/src/tex/tex_metrics.c \
     $(TEX_ROOT)/src/tex/tex_fonts.c \
+    $(TEX_ROOT)/src/tex/tex_metrics.c \
     $(TEX_ROOT)/src/tex/tex_token.c \
     $(TEX_ROOT)/src/tex/tex_parse.c \
     $(TEX_ROOT)/src/tex/tex_measure.c \
@@ -29,7 +29,7 @@ EXTRA_C_SOURCES = \
 
 CFLAGS += -I$(TEX_ROOT)/src -I$(TEX_ROOT)/src/tex -I$(TEX_ROOT)/include
 CFLAGS += -I$(TEX_ROOT)/autotests
-CFLAGS += -DTEX_USE_FONTLIB -DTEX_DIRECT_RENDER
+CFLAGS += -DTEX_DIRECT_RENDER
 CFLAGS += -Wframe-larger-than=126
 
 include $(shell cedev-config --makefile)

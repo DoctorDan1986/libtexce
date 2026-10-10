@@ -12,147 +12,176 @@
 #include "texfont.h"
 
 
-typedef struct
-{
-	ListId head;
-	ListId tail_id;
-	TexListBlock* tail_block;
-} DrawListBuilder;
-
-static void dlb_init(DrawListBuilder* lb)
-{
-	lb->head = LIST_NULL;
-	lb->tail_id = LIST_NULL;
-	lb->tail_block = NULL;
-}
-
-static void dlb_push(UnifiedPool* pool, DrawListBuilder* lb, NodeRef item)
-{
-	if (item == NODE_NULL)
-		return;
-
-	// Need a new block?
-	if (lb->tail_block == NULL || lb->tail_block->count >= TEX_LIST_BLOCK_CAP)
-	{
-		ListId new_id = pool_alloc_list_block(pool);
-		if (new_id == LIST_NULL)
-			return;
-		TexListBlock* new_block = pool_get_list_block(pool, new_id);
-
-		if (lb->head == LIST_NULL)
-			lb->head = new_id;
-		else
-			lb->tail_block->next = new_id;
-
-		lb->tail_id = new_id;
-		lb->tail_block = new_block;
-	}
-
-	// Append item to current block
-	lb->tail_block->items[lb->tail_block->count++] = item;
-}
 
 static UnifiedPool* g_draw_pool = NULL;
 
-#include <fontlibc.h>
 #include <graphx.h>
 #if defined(__TICE__)
 #include <debug.h>
 #endif
 
-static fontlib_font_t* g_draw_font_main = NULL;
-static fontlib_font_t* g_draw_font_script = NULL;
-static FontRole g_draw_current_role = (FontRole)-1;
 static int g_draw_vis_top = 0;
 static int g_draw_vis_bot = TEX_VIEWPORT_H;
-
-void tex_draw_set_fonts(fontlib_font_t* main, fontlib_font_t* script)
-{
-	g_draw_font_main = main;
-	g_draw_font_script = script;
-	g_draw_current_role = (FontRole)-1;
-}
-
-static inline void ensure_font(FontRole role)
-{
-	if (role != g_draw_current_role)
-	{
-		fontlib_SetFont(role ? g_draw_font_script : g_draw_font_main, (fontlib_load_options_t)0);
-		g_draw_current_role = (FontRole)role;
-	}
-}
+static int g_draw_x0 = 0;
+static int g_draw_x1 = GFX_LCD_WIDTH;
+static uint8_t* g_draw_pixels;
+static const uint8_t* g_draw_palette;
 
 // -------------------------
 // drawing primitives
 // -------------------------
-static void rec_text(int x, int y_top, const char* s, int len, FontRole role)
+static void blend_pixel(uint8_t* pixel, unsigned int level)
 {
-	int asc = tex_metrics_asc(role);
-	int desc = tex_metrics_desc(role);
-	int h = asc + desc;
-
-	if (y_top < g_draw_vis_top || (y_top + h) > g_draw_vis_bot)
-	{
+	if (!level)
 		return;
-	}
-	ensure_font(role);
-	fontlib_SetCursorPosition((uint24_t)x, (uint8_t)y_top);
-	if (s && len > 0)
-		fontlib_DrawStringL(s, (size_t)len);
+
+	uint8_t old = *pixel;
+	unsigned int previous = old == g_draw_palette[3] ? 3u :
+	    old == g_draw_palette[2] ? 2u :
+	    old == g_draw_palette[1] ? 1u : 0u;
+	if (level > previous)
+		*pixel = g_draw_palette[level];
 }
 
-static void rec_glyph(int x, int y_top, int glyph, FontRole role)
+static void rec_pixel(int x, int y, unsigned int level)
 {
-	int asc = tex_metrics_asc(role);
-	int desc = tex_metrics_desc(role);
-	int h = asc + desc;
-
-	if (y_top < g_draw_vis_top || (y_top + h) > g_draw_vis_bot)
-	{
-		return;
-	}
-	ensure_font(role);
-	fontlib_SetCursorPosition((uint24_t)x, (uint8_t)y_top);
-	fontlib_DrawGlyph((uint8_t)glyph);
+	if (x >= g_draw_x0 && x < g_draw_x1 && y >= g_draw_vis_top && y < g_draw_vis_bot)
+		blend_pixel(g_draw_pixels + y * GFX_LCD_WIDTH + x, level);
 }
+
+static int draw_glyph(int x, int baseline, uint16_t code, TeX_Font font)
+{
+	TexGlyph glyph;
+	if (!tex_font_glyph(font, code, &glyph))
+		return 0;
+
+	int x0 = x + glyph.x_offset;
+	int y0 = baseline + glyph.y_offset;
+	int left = TEX_MAX(x0, g_draw_x0);
+	int right = TEX_MIN(x0 + glyph.width, g_draw_x1);
+	int top = TEX_MAX(y0, g_draw_vis_top);
+	int bottom = TEX_MIN(y0 + glyph.height, g_draw_vis_bot);
+	if (left >= right || top >= bottom)
+		return glyph.advance;
+
+	// each byte holds 4 2 bit coverage values, most significant first
+	static const uint8_t mask[4] = { 192, 48, 12, 3 };
+	static const uint8_t middle[4] = { 128, 32, 8, 2 };
+	for (int row = top; row < bottom; ++row)
+	{
+		unsigned int offset = (unsigned int)((row - y0) * glyph.width + left - x0);
+		const uint8_t* bits = glyph.pixels + offset / 4;
+		unsigned int part = offset % 4;
+		uint8_t* dst = g_draw_pixels + row * GFX_LCD_WIDTH + left;
+
+		for (int col = left; col < right; ++col, ++dst)
+		{
+			uint8_t value = (uint8_t)(*bits & mask[part]);
+			if (value)
+				blend_pixel(dst, value == mask[part] ? 3u : value == middle[part] ? 2u : 1u);
+
+			if (++part == 4)
+			{
+				part = 0;
+				++bits;
+			}
+		}
+	}
+
+	return glyph.advance;
+}
+
+static void rec_text(int x, int baseline, const char* s, int len, FontRole role)
+{
+	TeX_Font font = tex_metrics_font(role);
+
+	for (int i = 0; i < len && s[i]; ++i)
+		x += draw_glyph(x, baseline, (uint8_t)s[i], font);
+}
+
 
 static void rec_rule(int x, int y, int w)
 {
 	if (y < g_draw_vis_top || y >= g_draw_vis_bot)
-	{
 		return;
-	}
-	gfx_HorizLine(x, y, w);
+
+	int left = TEX_MAX(x, g_draw_x0);
+	int right = TEX_MIN(x + w, g_draw_x1);
+	if (left < right)
+		memset(g_draw_pixels + y * GFX_LCD_WIDTH + left, g_draw_palette[3], (size_t)(right - left));
 }
 
 static void rec_line(int x1, int y1, int x2, int y2)
 {
+	// Wu rasterization: split coverage between adjacent pixels, using
+	// the same four levels as glyphs
+	int steep = abs(y2 - y1) > abs(x2 - x1);
 
-	if ((y1 < g_draw_vis_top && y2 < g_draw_vis_top) || (y1 >= g_draw_vis_bot && y2 >= g_draw_vis_bot))
+	// u follows the major axis; v follows the minor axis
+	int u0 = steep ? y1 : x1;
+	int u1 = steep ? y2 : x2;
+	int v0 = steep ? x1 : y1;
+	int v1 = steep ? x2 : y2;
+	if (u0 > u1)
 	{
+		int tmp = u0;
+		u0 = u1;
+		u1 = tmp;
+
+		tmp = v0;
+		v0 = v1;
+		v1 = tmp;
+	}
+
+	int major = u1 - u0;
+	int minor = abs(v1 - v0);
+	int direction = v1 < v0 ? -1 : 1;
+	if (!major)
+	{
+		rec_pixel(x1, y1, 3);
 		return;
 	}
-	gfx_Line(x1, y1, x2, y2);
+
+	int first = TEX_MAX(u0, steep ? g_draw_vis_top : g_draw_x0);
+	int last = TEX_MIN(u1, (steep ? g_draw_vis_bot : g_draw_x1) - 1);
+	if (first > last)
+		return;
+
+	long advance = (long)(first - u0) * minor;
+	int v = v0 + direction * (int)(advance / major);
+	int remainder = (int)(advance % major);
+
+	// round fractional coverage into the four palettes
+	int half = major / 2;
+	int threshold_one = (major - half + 2) / 3;
+	int threshold_two = (2 * major - half + 2) / 3;
+	int threshold_three = (3 * major - half + 2) / 3;
+
+	for (int u = first; u <= last; ++u)
+	{
+		unsigned int shade = remainder >= threshold_three ? 3u :
+		    remainder >= threshold_two ? 2u :
+		    remainder >= threshold_one ? 1u : 0u;
+		rec_pixel(steep ? v : u, steep ? u : v, 3u - shade);
+		if (shade)
+			rec_pixel(steep ? v + direction : u, steep ? u : v + direction, shade);
+
+		remainder += minor;
+		if (remainder >= major)
+		{
+			remainder -= major;
+			v += direction;
+		}
+	}
 }
 
 static void rec_dot(int cx, int cy)
 {
-	if (cy < g_draw_vis_top || cy >= g_draw_vis_bot)
-	{
-		return;
-	}
-	gfx_FillCircle(cx, cy, 1);
-}
-
-static void rec_ellipse(int cx, int cy, int rx, int ry)
-{
-	if ((cy + ry) < g_draw_vis_top || (cy - ry) >= g_draw_vis_bot)
-	{
-		return;
-	}
-	if (rx < 0 || ry < 0)
-		return;
-	gfx_Ellipse(cx, cy, (uint24_t)rx, (uint24_t)ry);
+	rec_pixel(cx, cy, 3);
+	rec_pixel(cx - 1, cy, 2);
+	rec_pixel(cx + 1, cy, 2);
+	rec_pixel(cx, cy - 1, 2);
+	rec_pixel(cx, cy + 1, 2);
 }
 
 
@@ -168,7 +197,9 @@ static void rec_draw_paren(int x, int y_center, int w, int h, int is_left)
 	static const int cos_table[7] = { 0, 128, 221, 256, 221, 128, 0 };
 	static const int sin_table[7] = { -256, -221, -128, 0, 128, 221, 256 };
 
-	int cx, prev_px, prev_py;
+	int cx;
+	int prev_px;
+	int prev_py;
 
 	if (is_left)
 	{
@@ -185,7 +216,8 @@ static void rec_draw_paren(int x, int y_center, int w, int h, int is_left)
 
 	for (int i = 1; i < 7; i++)
 	{
-		int cur_px, cur_py;
+		int cur_px;
+		int cur_py;
 		cur_py = y_center + (ry * sin_table[i]) / 256;
 
 		if (is_left)
@@ -199,8 +231,24 @@ static void rec_draw_paren(int x, int y_center, int w, int h, int is_left)
 	}
 }
 
-void tex_draw_log_reset(void) {}
-int tex_draw_log_count(void) { return 0; }
+static void rec_ellipse(int cx, int cy, int rx, int ry)
+{
+	if (rx < 0 || ry < 0)
+		return;
+
+	rec_draw_paren(cx - rx, cy, rx + 1, ry * 2, 1);
+	rec_draw_paren(cx, cy, rx + 1, ry * 2, 0);
+}
+
+
+void tex_draw_log_reset(void)
+{
+}
+
+int tex_draw_log_count(void)
+{
+	return 0;
+}
 int tex_draw_log_get(TexDrawOp* out, int max)
 {
 	(void)out;
@@ -218,231 +266,126 @@ int tex_draw_log_get_range(TexDrawOp* out, int start, int count)
 // -------------------------
 // Node draw routines
 // -------------------------
-static int g_axis_y = 0;
-static void draw_node(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role);
+static void draw_node(Node* node, TexCoord x, TexBaseline baseline_y);
 
 static void draw_math_list(ListId head, TexCoord x, TexBaseline baseline_y, FontRole role)
 {
-	TexCoord cur_x = x;
-	for (ListId bid = head; bid != LIST_NULL;)
+	TexMathCursor cursor;
+	tex_math_begin(&cursor, head, role);
+	int offset;
+	Node* node;
+	while ((node = tex_math_next(g_draw_pool, &cursor, &offset)))
+		draw_node(node, (TexCoord){x.v + offset}, baseline_y);
+}
+
+static void draw_script(Node* node, TexCoord x, TexBaseline baseline_y)
+{
+	TexScriptGeometry geometry;
+	tex_measure_script_geometry(g_draw_pool, node, &geometry);
+
+	draw_node(pool_get_node(g_draw_pool, node->data.script.base),
+	    (TexCoord){ x.v + geometry.base_x }, baseline_y);
+	draw_node(pool_get_node(g_draw_pool, node->data.script.sup),
+	    (TexCoord){ x.v + geometry.sup_x }, (TexBaseline){ baseline_y.v + geometry.sup_y });
+	draw_node(pool_get_node(g_draw_pool, node->data.script.sub),
+	    (TexCoord){ x.v + geometry.sub_x }, (TexBaseline){ baseline_y.v + geometry.sub_y });
+}
+
+static void draw_frac(Node* node, TexCoord x, TexBaseline baseline_y)
+{
+	TexFracGeometry geometry;
+	tex_measure_frac_geometry(g_draw_pool, node, &geometry);
+
+	for (int row = 0; row < geometry.rule; ++row)
+		rec_rule(x.v + geometry.bar_x, baseline_y.v + geometry.bar_y + row, geometry.bar_w);
+
+	draw_node(pool_get_node(g_draw_pool, node->data.frac.num),
+	    (TexCoord){ x.v + geometry.num_x }, (TexBaseline){ baseline_y.v + geometry.num_y });
+	draw_node(pool_get_node(g_draw_pool, node->data.frac.den),
+	    (TexCoord){ x.v + geometry.den_x }, (TexBaseline){ baseline_y.v + geometry.den_y });
+}
+
+static void draw_sqrt(Node* node, TexCoord x, TexBaseline baseline_y)
+{
+	TexSqrtGeometry geometry;
+	tex_measure_sqrt_geometry(g_draw_pool, node, &geometry);
+
+	int left = x.v + geometry.head_x;
+	int join = left + geometry.head_w;
+	int top = baseline_y.v + geometry.bar_y;
+	int bottom = baseline_y.v + geometry.bottom_y;
+	int height = bottom - top;
+
+	rec_line(left, bottom - height / 4, left + geometry.head_w / 4, bottom - height / 3);
+	rec_line(left + geometry.head_w / 4, bottom - height / 3, left + geometry.head_w / 2, bottom);
+	rec_line(left + geometry.head_w / 2, bottom, join, top);
+
+	for (int row = 0; row < geometry.rule; ++row)
+		rec_rule(join, top + row, geometry.w - geometry.head_x - geometry.head_w);
+
+	draw_node(pool_get_node(g_draw_pool, node->data.sqrt.rad),
+	    (TexCoord){ x.v + geometry.rad_x }, baseline_y);
+	draw_node(pool_get_node(g_draw_pool, node->data.sqrt.index),
+	    (TexCoord){ x.v + geometry.index_x }, (TexBaseline){ baseline_y.v + geometry.index_y });
+}
+
+static void draw_overlay(Node* node, TexCoord x, TexBaseline baseline_y, FontRole role)
+{
+	Node* base = pool_get_node(g_draw_pool, node->data.overlay.base);
+
+	draw_node(base, x, baseline_y);
+
+	int top = baseline_y.v - base->asc - TEX_ACCENT_GAP;
+
+	const Node* nucleus = base;
+	while (nucleus->type == N_MATH)
 	{
-		TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-		if (!block)
+		TexListBlock* block = pool_get_list_block(g_draw_pool, nucleus->data.list.head);
+		if (!block || block->count != 1 || block->next != LIST_NULL)
 			break;
-		for (uint16_t i = 0; i < block->count; i++)
-		{
-			Node* n = pool_get_node(g_draw_pool, block->items[i]);
-			if (!n)
-				continue;
-			draw_node(n, cur_x, baseline_y, role);
-			cur_x.v += n->w;
-		}
-		bid = block->next;
+		nucleus = pool_get_node(g_draw_pool, block->items[0]);
 	}
-}
+	TexGlyph base_glyph;
+	int center = x.v +
+	    (nucleus->type == N_GLYPH && tex_metrics_glyph(nucleus, &base_glyph) ?
+	     base_glyph.top_accent : base->w / 2);
 
-static void draw_script(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
-{
-	Node* base = pool_get_node(g_draw_pool, n->data.script.base);
-	Node* sub = pool_get_node(g_draw_pool, n->data.script.sub);
-	Node* sup = pool_get_node(g_draw_pool, n->data.script.sup);
-
-	if (base)
-		draw_node(base, x, baseline_y, role);
-
-	TexCoord script_x = { x.v + (base ? base->w : 0) + TEX_SCRIPT_XPAD };
-	int is_bigop = base && tex_node_is_big_operator(base);
-
-	// precalculate big operator vertical bounds using the math axis
-	int op_top = 0, op_bot = 0;
-	if (is_bigop)
-	{
-		int op_bias = 0;
-
-		if (base->type == N_MULTIOP)
-		{
-			if (base->data.multiop.op_type == MULTIOP_INT)
-				op_bias = TEX_AXIS_BIAS_INTEGRAL;
-		}
-		else if (base->type == N_GLYPH)
-		{
-			unsigned char g = (unsigned char)base->data.glyph;
-			// NOLINTBEGIN(bugprone-branch-clone)
-			if (g == (unsigned char)TEXFONT_INTEGRAL_CHAR)
-				op_bias = TEX_AXIS_BIAS_INTEGRAL;
-			else if (g == (unsigned char)TEXFONT_SUMMATION_CHAR)
-				op_bias = TEX_AXIS_BIAS_SUM;
-			else if (g == (unsigned char)TEXFONT_PRODUCT_CHAR)
-				op_bias = TEX_AXIS_BIAS_PROD;
-			// NOLINTEND(bugprone-branch-clone)
-		}
-
-		int half = (base->asc + base->desc) / 2;
-		int axis = g_axis_y + op_bias;
-		op_top = axis - half;
-		op_bot = axis + half;
-	}
-
-	// shared metrics for nonbigop positioning
-	int std_asc = tex_metrics_asc(role);
-	int std_desc = tex_metrics_desc(role);
-
-	int def_up = std_asc - (std_asc / 3);
-	int def_down = std_desc;
-
-	int base_asc = base ? base->asc : 0;
-	int base_desc = base ? base->desc : 0;
-
-	// corner offsets where sup drops below top, sub pushed below bottom
-	int off_up = std_asc / 2;
-	int off_down = -(std_asc / 4);
-
-	int shift_up = TEX_MAX(def_up, base_asc - off_up);
-	int shift_down = TEX_MAX(def_down, base_desc - off_down);
-
-	if (sup)
-	{
-		TexBaseline sup_bl;
-		if (is_bigop)
-		{
-			sup_bl.v = (op_top + TEX_BIGOP_OVERLAP) - sup->desc;
-		}
-		else
-		{
-			sup_bl.v = baseline_y.v - shift_up;
-		}
-		draw_node(sup, script_x, sup_bl, FONTROLE_SCRIPT);
-	}
-
-	if (sub)
-	{
-		TexBaseline sub_bl;
-		if (is_bigop)
-		{
-			sub_bl.v = (op_bot - TEX_BIGOP_OVERLAP) + sub->asc;
-		}
-		else
-		{
-			sub_bl.v = baseline_y.v + shift_down;
-		}
-		draw_node(sub, script_x, sub_bl, FONTROLE_SCRIPT);
-	}
-}
-
-static void draw_frac(Node* n, TexCoord x, TexBaseline baseline_y)
-{
-	Node* num = pool_get_node(g_draw_pool, n->data.frac.num);
-	Node* den = pool_get_node(g_draw_pool, n->data.frac.den);
-
-	int axis = tex_metrics_math_axis();
-	int rule_y = baseline_y.v - axis;
-
-	int rule_x = x.v + TEX_FRAC_OUTER_PAD;
-	int rule_w = n->w - (2 * TEX_FRAC_OUTER_PAD);
-
-	rec_rule(rule_x, rule_y, rule_w);
-
-	if (num)
-	{
-		TexCoord num_x = { x.v + (n->w - num->w) / 2 };
-		TexBaseline num_bl = { rule_y - TEX_FRAC_YPAD - num->desc };
-		draw_node(num, num_x, num_bl, FONTROLE_SCRIPT);
-	}
-	if (den)
-	{
-		TexCoord den_x = { x.v + (n->w - den->w) / 2 };
-		TexBaseline den_bl = { rule_y + TEX_RULE_THICKNESS + TEX_FRAC_YPAD + den->asc };
-		draw_node(den, den_x, den_bl, FONTROLE_SCRIPT);
-	}
-}
-
-static void draw_sqrt(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
-{
-	Node* rad = pool_get_node(g_draw_pool, n->data.sqrt.rad);
-	Node* idx = pool_get_node(g_draw_pool, n->data.sqrt.index);
-
-	int head_w = tex_metrics_glyph_width((unsigned char)TEXFONT_SQRT_HEAD_CHAR, role);
-
-	int idx_w = idx ? idx->w : 0;
-	int idx_offset = 0;
-	if (idx)
-	{
-		idx_offset = idx_w + TEX_SQRT_INDEX_KERNING;
-		if (idx_offset < 0)
-			idx_offset = 0;
-	}
-
-	int head_x = x.v + idx_offset;
-	int head_y_top = baseline_y.v - tex_metrics_asc(role);
-	rec_glyph(head_x, head_y_top, (unsigned char)TEXFONT_SQRT_HEAD_CHAR, role);
-
-	if (idx)
-	{
-		TexCoord idx_x = { x.v };
-		TexBaseline idx_bl = { baseline_y.v - (tex_metrics_asc(role) / 2) };
-		draw_node(idx, idx_x, idx_bl, FONTROLE_SCRIPT);
-	}
-
-	int bar_x = head_x + head_w + TEX_SQRT_HEAD_XPAD;
-	if (rad)
-	{
-		int bar_y = baseline_y.v - rad->asc - TEX_ACCENT_GAP;
-
-		int width = (x.v + n->w) - bar_x;
-		rec_line(bar_x, bar_y, bar_x + width, bar_y);
-		TexCoord rad_x = { bar_x };
-		draw_node(rad, rad_x, baseline_y, role);
-	}
-}
-
-static void draw_overlay(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
-{
-	Node* b = pool_get_node(g_draw_pool, n->data.overlay.base);
-
-	if (b)
-		draw_node(b, x, baseline_y, role);
-
-	if (!b)
-		return;
-
-	int top = baseline_y.v - b->asc - TEX_ACCENT_GAP;
-
-	switch (n->data.overlay.type)
+	switch (node->data.overlay.type)
 	{
 	case ACC_BAR:
 		{
 			int bar_y = top - 1;
-			int pad = (b->w > 2) ? 1 : 0;
-			rec_line(x.v + pad, bar_y, x.v + b->w - 1 - pad, bar_y);
+			int pad = (base->w > 2) ? 1 : 0;
+			rec_line(x.v + pad, bar_y, x.v + base->w - 1 - pad, bar_y);
 		}
 		break;
 
 	case ACC_OVERLINE:
 		{
 			int line_y = top - 1;
-			int pad = (b->w > 2) ? 1 : 0;
-			rec_line(x.v + pad, line_y, x.v + b->w - 1 - pad, line_y);
+			int pad = (base->w > 2) ? 1 : 0;
+			rec_line(x.v + pad, line_y, x.v + base->w - 1 - pad, line_y);
 		}
 		break;
 
 	case ACC_UNDERLINE:
 		{
-			int line_y = baseline_y.v + b->desc + TEX_ACCENT_GAP;
-			int pad = (b->w > 2) ? 1 : 0;
-			rec_line(x.v + pad, line_y, x.v + b->w - 1 - pad, line_y);
+			int line_y = baseline_y.v + base->desc + TEX_ACCENT_GAP;
+			int pad = (base->w > 2) ? 1 : 0;
+			rec_line(x.v + pad, line_y, x.v + base->w - 1 - pad, line_y);
 		}
 		break;
 
 	case ACC_DOT:
 		{
-			int cx = x.v + b->w / 2;
+			int cx = center;
 			rec_dot(cx, top - 1);
 		}
 		break;
 
 	case ACC_HAT:
 		{
-			int cx = x.v + b->w / 2;
+			int cx = center;
 			int dy = 3;
 			rec_line(cx - dy, top, cx, top - dy);
 			rec_line(cx, top - dy, cx + dy, top);
@@ -451,8 +394,8 @@ static void draw_overlay(Node* n, TexCoord x, TexBaseline baseline_y, FontRole r
 
 	case ACC_VEC:
 		{
-			int len = TEX_MAX(5, b->w);
-			int x_end = x.v + b->w;
+			int len = TEX_MAX(5, base->w);
+			int x_end = center + (len + 1) / 2;
 			int x_start = x_end - len;
 			int y = top - 2;
 
@@ -464,7 +407,7 @@ static void draw_overlay(Node* n, TexCoord x, TexBaseline baseline_y, FontRole r
 
 	case ACC_DDOT:
 		{
-			int cx = x.v + b->w / 2;
+			int cx = center;
 			int sep = 2;
 			rec_dot(cx - sep, top - 1);
 			rec_dot(cx + sep, top - 1);
@@ -473,9 +416,13 @@ static void draw_overlay(Node* n, TexCoord x, TexBaseline baseline_y, FontRole r
 
 	case ACC_TILDE:
 		{
-			int glyph_w = tex_metrics_glyph_width('~', role);
-			int cx = x.v + (b->w - glyph_w) / 2;
-			rec_glyph(cx, top - 3, '~', role);
+			TeX_Font font = tex_metrics_font(role);
+			TexGlyph glyph;
+			if (tex_font_glyph(font, '~', &glyph))
+			{
+				int cx = center - glyph.width / 2 - glyph.x_offset;
+				(void)draw_glyph(cx, top - glyph.height - glyph.y_offset, '~', font);
+			}
 		}
 		break;
 
@@ -514,94 +461,63 @@ static void draw_hbrace(int x, int y, int w, int is_over)
 	}
 }
 
-static void draw_spandeco(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
+static void draw_spandeco(Node* node, TexCoord x, TexBaseline baseline_y)
 {
-	Node* content = pool_get_node(g_draw_pool, n->data.spandeco.content);
-	Node* label = pool_get_node(g_draw_pool, n->data.spandeco.label);
-	if (content)
-		draw_node(content, x, baseline_y, role);
-	int w = content ? content->w : 0;
+	Node* content = pool_get_node(g_draw_pool, node->data.spandeco.content);
+	Node* label = pool_get_node(g_draw_pool, node->data.spandeco.label);
+	draw_node(content, x, baseline_y);
+	int w = content->w;
 	int bh = TEX_BRACE_HEIGHT;
-	if (n->data.spandeco.deco_type == DECO_OVERBRACE)
+	if (node->data.spandeco.deco_type == DECO_OVERBRACE)
 	{
-		int brace_y = baseline_y.v - (content ? content->asc : 0) - TEX_ACCENT_GAP - bh + 1;
+		int brace_y = baseline_y.v - content->asc - TEX_ACCENT_GAP - bh + 1;
 		draw_hbrace(x.v, brace_y, w, 1);
 		if (label)
 		{
 			TexCoord label_x = { x.v + (w - label->w) / 2 };
 			TexBaseline label_bl = { brace_y - TEX_ACCENT_GAP - label->desc };
-			draw_node(label, label_x, label_bl, FONTROLE_SCRIPT);
+			draw_node(label, label_x, label_bl);
 		}
 	}
-	else if (n->data.spandeco.deco_type == DECO_UNDERBRACE)
+	else
 	{
 		int ub_gap = TEX_ACCENT_GAP + 2; // extra space above underbrace for tall delimiters
-		int brace_y = baseline_y.v + (content ? content->desc : 0) + ub_gap;
+		int brace_y = baseline_y.v + content->desc + ub_gap;
 		draw_hbrace(x.v, brace_y, w, 0);
 		if (label)
 		{
 			TexCoord label_x = { x.v + (w - label->w) / 2 };
 			TexBaseline label_bl = { brace_y + bh + TEX_ACCENT_GAP + label->asc };
-			draw_node(label, label_x, label_bl, FONTROLE_SCRIPT);
+			draw_node(label, label_x, label_bl);
 		}
 	}
 }
 
-static void draw_multiop(Node* n, TexCoord x)
+static void draw_multiop(Node* node, TexCoord x, TexBaseline baseline_y)
 {
-	if (!n)
-		return;
+	TexGlyph glyph;
+	(void)tex_metrics_glyph(node, &glyph);
+	FontRole role = (node->flags & TEX_FLAG_SCRIPT) ? FONTROLE_SCRIPT : FONTROLE_MAIN;
+	TeX_Font font = tex_metrics_font(role);
+	uint16_t code = tex_font_math_code((uint8_t)TEXFONT_INTEGRAL_CHAR, (node->flags & TEX_FLAG_MATHF_DISPLAY) != 0);
 
-	uint8_t count = n->data.multiop.count;
-	if (count < 1)
-		count = 1;
+	for (uint8_t i = 0; i < node->data.multiop.count; ++i)
+		(void)draw_glyph(x.v + i * glyph.advance, baseline_y.v, code, font);
 
-	FontRole effective_role = FONTROLE_MAIN;
-
-	int glyph_w = tex_metrics_glyph_width((unsigned char)TEXFONT_INTEGRAL_CHAR, effective_role);
-	int kern = TEX_MULTIOP_KERN;
-
-	int half = (n->asc + n->desc) / 2;
-	int bias = TEX_AXIS_BIAS_INTEGRAL;
-	int y_top = (g_axis_y + bias) - half;
-
-	int cur_x = x.v;
-	for (uint8_t i = 0; i < count; i++)
+	if (node->data.multiop.op_type == MULTIOP_OINT)
 	{
-		rec_glyph(cur_x, y_top, (int)TEXFONT_INTEGRAL_CHAR, effective_role);
-		cur_x += glyph_w + kern;
-	}
-
-	if (n->data.multiop.op_type == MULTIOP_OINT)
-	{
-		int cx = x.v + (n->w - 1) / 2;
-		int cy = g_axis_y + bias;
-		int rx = n->w / 2;
-		int ry = glyph_w / 2;
-		rec_ellipse(cx, cy, rx, ry);
+		int cx = x.v + (node->w - 1) / 2;
+		int cy = baseline_y.v - tex_font_metric(font, TEX_FONT_AXIS);
+		rec_ellipse(cx, cy, node->w / 2, glyph.advance / 2);
 	}
 }
 
-static void draw_func_lim(Node* n, TexCoord x, TexBaseline baseline_y)
-{
-	int y_top = baseline_y.v - tex_metrics_asc(FONTROLE_MAIN);
-	rec_text(x.v, y_top, "lim", 3, FONTROLE_MAIN);
-	Node* lim = pool_get_node(g_draw_pool, n->data.func_lim.limit);
-	if (lim)
-	{
-		int lim_text_w = tex_metrics_text_width("lim", FONTROLE_MAIN);
-		TexCoord lim_x = { x.v + (lim_text_w - lim->w) / 2 };
-		TexBaseline lim_bl = { baseline_y.v + TEX_FRAC_YPAD + TEX_RULE_THICKNESS + lim->asc };
-		draw_node(lim, lim_x, lim_bl, FONTROLE_SCRIPT);
-	}
-}
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-static void draw_proc_delim(int x, int y_center, int h, DelimType type, int is_left)
+static void draw_proc_delim(int x, int y_center, int h, DelimType type, int is_left, const TexDelimiterGeometry* geometry)
 {
-	int delim_w = h / TEX_DELIM_WIDTH_FACTOR;
-	delim_w = TEX_CLAMP(delim_w, TEX_DELIM_MIN_WIDTH, TEX_DELIM_MAX_WIDTH);
-	int w = delim_w;
+	x += geometry->ink_x;
+	int w = geometry->ink_w;
 
 	int top = y_center - h / 2;
 	int bot = y_center + h / 2;
@@ -634,7 +550,8 @@ static void draw_proc_delim(int x, int y_center, int h, DelimType type, int is_l
 			const int lut_steps = sizeof(LUT_Y) / sizeof(LUT_Y[0]);
 
 			int half_h = h / 2;
-			int prev_px, prev_py;
+			int prev_px;
+			int prev_py;
 
 			// beak setup
 			int beak_x = is_left ? x : (x + w - 1);
@@ -721,212 +638,104 @@ static void draw_proc_delim(int x, int y_center, int h, DelimType type, int is_l
 	}
 }
 
-static void draw_auto_delim(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
+static void draw_auto_delim(Node* node, TexCoord x, TexBaseline baseline_y, FontRole role)
 {
-	int h = n->data.auto_delim.delim_h;
-	int axis = tex_metrics_math_axis();
+	int h = node->data.auto_delim.delim_h;
+	int axis = tex_font_metric(tex_metrics_font(role), TEX_FONT_AXIS);
 	int y_center = baseline_y.v - axis;
 
-	int delim_w = h / TEX_DELIM_WIDTH_FACTOR;
-	delim_w = TEX_CLAMP(delim_w, TEX_DELIM_MIN_WIDTH, TEX_DELIM_MAX_WIDTH);
+	TexDelimiterGeometry left;
+	TexDelimiterGeometry right;
+	tex_measure_delimiter_geometry((DelimType)node->data.auto_delim.left_type, true, h, role, &left);
+	tex_measure_delimiter_geometry((DelimType)node->data.auto_delim.right_type, false, h, role, &right);
 
-	int l_w = (n->data.auto_delim.left_type == DELIM_NONE) ? 0 : delim_w;
-	int r_w = (n->data.auto_delim.right_type == DELIM_NONE) ? 0 : delim_w;
+	if (left.advance > 0)
+		draw_proc_delim(x.v, y_center, h, (DelimType)node->data.auto_delim.left_type, 1, &left);
 
-	int kern = delim_w / 2;
-	int l_kern = (n->data.auto_delim.left_type == DELIM_PAREN) ? kern : 0;
-	int r_kern = (n->data.auto_delim.right_type == DELIM_PAREN) ? kern : 0;
-
-	if (l_w > 0)
-		draw_proc_delim(x.v, y_center, h, (DelimType)n->data.auto_delim.left_type, 1);
-
-	ListId content_list = n->data.auto_delim.content;
+	ListId content_list = node->data.auto_delim.content;
 	if (content_list != LIST_NULL)
 	{
-		// shift things left by kerning amount (into the hollow of the parenthesis)
-		TexCoord content_x = { x.v + l_w - l_kern };
+		TexCoord content_x = { x.v + left.advance };
 		draw_math_list(content_list, content_x, baseline_y, role);
 	}
 
-	if (r_w > 0)
+	if (right.advance > 0)
 	{
-		int c_w = 0;
-		for (ListId bid = content_list; bid != LIST_NULL;)
-		{
-			TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-			if (!block)
-				break;
-			for (uint16_t i = 0; i < block->count; i++)
-			{
-				Node* cn = pool_get_node(g_draw_pool, block->items[i]);
-				if (cn)
-					c_w += cn->w;
-			}
-			bid = block->next;
-		}
-		// right delim start = (start of content) + (width of content) - (right kerning)
-		int rx = (x.v + l_w - l_kern) + c_w - r_kern;
-		draw_proc_delim(rx, y_center, h, (DelimType)n->data.auto_delim.right_type, 0);
+		int rx = x.v + node->w - right.advance;
+		draw_proc_delim(rx, y_center, h, (DelimType)node->data.auto_delim.right_type, 0, &right);
 	}
 }
 
-static void draw_matrix(Node* n, TexCoord x, TexBaseline baseline_y)
+static void draw_matrix(Node* node, TexCoord x, TexBaseline baseline_y)
 {
-	int16_t col_widths[TEX_MATRIX_MAX_DIMS] = { 0 };
-	int16_t row_ascs[TEX_MATRIX_MAX_DIMS] = { 0 };
-	int16_t row_descs[TEX_MATRIX_MAX_DIMS] = { 0 };
-
-	uint8_t rows = n->data.matrix.rows;
-	uint8_t cols = n->data.matrix.cols;
-
-	if (rows > TEX_MATRIX_MAX_DIMS)
-		rows = TEX_MATRIX_MAX_DIMS;
-	if (cols > TEX_MATRIX_MAX_DIMS)
-		cols = TEX_MATRIX_MAX_DIMS;
-	if (cols == 0)
-		cols = 1; // avoid division by zero
-
-	// Collect metrics (same as measurement)
-	uint8_t cell_idx = 0;
-	for (ListId bid = n->data.matrix.cells; bid != LIST_NULL;)
-	{
-		TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-		if (!block)
-			break;
-
-		for (uint16_t i = 0; i < block->count; i++)
-		{
-			uint8_t r = (uint8_t)(cell_idx / cols);
-			uint8_t c = (uint8_t)(cell_idx % cols);
-			if (r >= rows)
-				break;
-
-			Node* cell = pool_get_node(g_draw_pool, block->items[i]);
-			if (cell)
-			{
-				if (cell->w > col_widths[c])
-					col_widths[c] = cell->w;
-				if (cell->asc > row_ascs[r])
-					row_ascs[r] = cell->asc;
-				if (cell->desc > row_descs[r])
-					row_descs[r] = cell->desc;
-			}
-			cell_idx++;
-		}
-		bid = block->next;
-	}
-
-	// total dimensions
-	int16_t total_w = 0;
-	for (uint8_t c = 0; c < cols; c++)
-		TEX_COORD_ASSIGN(total_w, total_w + col_widths[c]);
-	if (cols > 1)
-		TEX_COORD_ASSIGN(total_w, total_w + (cols - 1) * TEX_MATRIX_COL_SPACING);
-
-	// add extra width for column separators
-	uint8_t sep_mask = n->data.matrix.col_separators;
-	while (sep_mask)
-	{
-		if (sep_mask & 1)
-			TEX_COORD_ASSIGN(total_w, total_w + 2 * TEX_MATRIX_SEP_PAD);
-		sep_mask >>= 1;
-	}
-
-	int16_t total_h = 0;
-	for (uint8_t r = 0; r < rows; r++)
-		TEX_COORD_ASSIGN(total_h, total_h + row_ascs[r] + row_descs[r]);
-	if (rows > 1)
-		TEX_COORD_ASSIGN(total_h, total_h + (rows - 1) * TEX_MATRIX_ROW_SPACING);
-
-	// delimiter dimensions
-	int16_t delim_h = total_h;
-	int16_t delim_w = 0;
-	if (n->data.matrix.delim_type != DELIM_NONE)
-	{
-		TEX_COORD_ASSIGN(delim_w, delim_h / TEX_DELIM_WIDTH_FACTOR);
-		TEX_COORD_ASSIGN(delim_w, TEX_CLAMP(delim_w, TEX_DELIM_MIN_WIDTH, TEX_DELIM_MAX_WIDTH));
-	}
-
-	int16_t axis = tex_metrics_math_axis();
-	int16_t y_center = (int16_t)(baseline_y.v - axis);
+	TexMatrixGeometry geometry;
+	tex_measure_matrix_geometry(g_draw_pool, node, &geometry);
+	int16_t y_center = (int16_t)(baseline_y.v - geometry.axis);
 
 	// left delimiter
-	if (n->data.matrix.delim_type != DELIM_NONE)
+	if (node->data.matrix.delim_type != DELIM_NONE)
 	{
-		draw_proc_delim(x.v, y_center, delim_h, (DelimType)n->data.matrix.delim_type, 1);
+		draw_proc_delim(x.v, y_center, geometry.content_h, (DelimType)node->data.matrix.delim_type, 1, &geometry.left);
 	}
 
 	// right delimiter
-	if (n->data.matrix.delim_type != DELIM_NONE)
+	if (node->data.matrix.delim_type != DELIM_NONE)
 	{
-		int16_t rx = (int16_t)(x.v + delim_w + total_w);
-		draw_proc_delim(rx, y_center, delim_h, (DelimType)n->data.matrix.delim_type, 0);
+		int16_t rx = (int16_t)(x.v + geometry.left.advance + geometry.content_w);
+		draw_proc_delim(rx, y_center, geometry.content_h, (DelimType)node->data.matrix.delim_type, 0, &geometry.right);
 	}
 
 	// cells
-	int16_t content_x = (int16_t)(x.v + delim_w);
-	int16_t content_y_top = (int16_t)(y_center - total_h / 2);
+	int16_t content_x = (int16_t)(x.v + geometry.left.advance);
+	int16_t content_y_top = (int16_t)(y_center - geometry.content_h / 2);
 
 	int16_t cur_y = content_y_top;
+	TexListBlock* block = pool_get_list_block(g_draw_pool, node->data.matrix.cells);
+	uint16_t item = 0;
 
-	for (uint8_t r = 0; r < rows; r++)
+	for (uint8_t r = 0; r < geometry.rows; r++)
 	{
-		int16_t row_baseline = (int16_t)(cur_y + row_ascs[r]);
+		int16_t row_baseline = (int16_t)(cur_y + geometry.row_ascs[r]);
 		int16_t cur_x = content_x;
 
-		for (uint8_t c = 0; c < cols; c++)
+		for (uint8_t c = 0; c < geometry.cols; c++)
 		{
-			// get cell from list by index
-			uint8_t target_idx = (uint8_t)(r * cols + c);
-			NodeRef cell_ref = NODE_NULL;
-
-			uint8_t search_idx = 0;
-			for (ListId bid = n->data.matrix.cells; bid != LIST_NULL && cell_ref == NODE_NULL;)
+			while (block && item >= block->count)
 			{
-				TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-				if (!block)
-					break;
-
-				for (uint16_t i = 0; i < block->count && cell_ref == NODE_NULL; i++)
-				{
-					if (search_idx == target_idx)
-					{
-						cell_ref = block->items[i];
-					}
-					search_idx++;
-				}
-				bid = block->next;
+				block = pool_get_list_block(g_draw_pool, block->next);
+				item = 0;
 			}
+			NodeRef cell_ref = block ? block->items[item++] : NODE_NULL;
 
 			Node* cell = pool_get_node(g_draw_pool, cell_ref);
 			if (cell)
 			{
 				// center cell horizontally within column
-				int16_t cell_x = (int16_t)(cur_x + (col_widths[c] - cell->w) / 2);
-				draw_node(cell, (TexCoord){ cell_x }, (TexBaseline){ row_baseline }, FONTROLE_MAIN);
+				int16_t cell_x = (int16_t)(cur_x + (geometry.col_widths[c] - cell->w) / 2);
+				draw_node(cell, (TexCoord){ cell_x }, (TexBaseline){ row_baseline });
 			}
 
-			cur_x = (int16_t)(cur_x + col_widths[c] + TEX_MATRIX_COL_SPACING);
+			cur_x = (int16_t)(cur_x + geometry.col_widths[c] + TEX_MATRIX_COL_SPACING);
 			// add extra padding if there's a separator after this column
-			if (n->data.matrix.col_separators & (1 << c))
+			if (node->data.matrix.col_separators & (1 << c))
 				cur_x = (int16_t)(cur_x + 2 * TEX_MATRIX_SEP_PAD);
 		}
 
-		cur_y = (int16_t)(cur_y + row_ascs[r] + row_descs[r] + TEX_MATRIX_ROW_SPACING);
+		cur_y = (int16_t)(cur_y + geometry.row_ascs[r] + geometry.row_descs[r] + TEX_MATRIX_ROW_SPACING);
 	}
 
 	// draw column separators (for array environment)
-	if (n->data.matrix.col_separators != 0)
+	if (node->data.matrix.col_separators != 0)
 	{
 		int16_t sep_x = content_x;
-		for (uint8_t c = 0; c < cols; c++)
+		for (uint8_t c = 0; c < geometry.cols; c++)
 		{
-			sep_x = (int16_t)(sep_x + col_widths[c]);
-			if (n->data.matrix.col_separators & (1 << c))
+			sep_x = (int16_t)(sep_x + geometry.col_widths[c]);
+			if (node->data.matrix.col_separators & (1 << c))
 			{
 				// draw vertical line centered in the gap (normal spacing + separator padding)
 				int16_t line_x = (int16_t)(sep_x + TEX_MATRIX_COL_SPACING / 2 + TEX_MATRIX_SEP_PAD);
-				rec_line(line_x, content_y_top, line_x, content_y_top + total_h);
+				rec_line(line_x, content_y_top, line_x, content_y_top + geometry.content_h);
 				sep_x = (int16_t)(sep_x + TEX_MATRIX_COL_SPACING + 2 * TEX_MATRIX_SEP_PAD);
 			}
 			else
@@ -937,84 +746,56 @@ static void draw_matrix(Node* n, TexCoord x, TexBaseline baseline_y)
 	}
 }
 
-static void draw_node(Node* n, TexCoord x, TexBaseline baseline_y, FontRole role)
+static void draw_node(Node* node, TexCoord x, TexBaseline baseline_y)
 {
-	if (!n)
+	if (!node)
 		return;
-	switch (n->type)
+
+	FontRole role = (node->flags & TEX_FLAG_SCRIPT) ? FONTROLE_SCRIPT : FONTROLE_MAIN;
+
+	switch (node->type)
 	{
 	case N_TEXT:
 		{
-			int y_top = baseline_y.v - n->asc;
-			const char* s = pool_get_string(g_draw_pool, n->data.text.sid);
-			int len = n->data.text.len;
-			if (!s || len <= 0)
-			{
-				s = "";
-				len = 0;
-			}
-			rec_text(x.v, y_top, s, len, role);
+			const char* s = pool_get_string(g_draw_pool, node->data.text.sid);
+			int len = node->data.text.len;
+			rec_text(x.v, baseline_y.v, s, len, role);
 		}
 		break;
 	case N_GLYPH:
 		{
-			FontRole effective_role = role;
-			int is_bigop = tex_is_big_operator(n->data.glyph);
-			if (is_bigop)
-			{
-				effective_role = FONTROLE_MAIN;
-				int half = (n->asc + n->desc) / 2;
-				int bias = 0;
-				unsigned char g = (unsigned char)n->data.glyph;
-				// NOLINTBEGIN(bugprone-branch-clone) - Intentional separate branches for future differentiation
-				if (g == (unsigned char)TEXFONT_INTEGRAL_CHAR)
-					bias = TEX_AXIS_BIAS_INTEGRAL;
-				else if (g == (unsigned char)TEXFONT_SUMMATION_CHAR)
-					bias = TEX_AXIS_BIAS_SUM;
-				else if (g == (unsigned char)TEXFONT_PRODUCT_CHAR)
-					bias = TEX_AXIS_BIAS_PROD;
-				// NOLINTEND(bugprone-branch-clone)
-				int y_top = (g_axis_y + bias) - half;
-				rec_glyph(x.v, y_top, (int)n->data.glyph, effective_role);
-			}
-			else
-			{
-				int y_top = baseline_y.v - n->asc;
-				rec_glyph(x.v, y_top, (int)n->data.glyph, effective_role);
-			}
+			uint16_t code = tex_font_math_code((uint8_t)node->data.glyph, (node->flags & TEX_FLAG_MATHF_DISPLAY) != 0);
+			(void)draw_glyph(x.v, baseline_y.v, code, tex_metrics_font(role));
 		}
 		break;
 	case N_SPACE:
 		break;
 	case N_MATH:
-		draw_math_list(n->data.list.head, x, baseline_y, role);
+		draw_math_list(node->data.list.head, x, baseline_y, role);
 		break;
 	case N_SCRIPT:
-		draw_script(n, x, baseline_y, role);
+		draw_script(node, x, baseline_y);
 		break;
 	case N_FRAC:
-		draw_frac(n, x, baseline_y);
+		draw_frac(node, x, baseline_y);
 		break;
 	case N_SQRT:
-		draw_sqrt(n, x, baseline_y, role);
+		draw_sqrt(node, x, baseline_y);
 		break;
 	case N_OVERLAY:
-		draw_overlay(n, x, baseline_y, role);
+		draw_overlay(node, x, baseline_y, role);
 		break;
 	case N_SPANDECO:
-		draw_spandeco(n, x, baseline_y, role);
-		break;
-	case N_FUNC_LIM:
-		draw_func_lim(n, x, baseline_y);
+		draw_spandeco(node, x, baseline_y);
 		break;
 	case N_MULTIOP:
-		draw_multiop(n, x);
+		draw_multiop(node, x, baseline_y);
 		break;
 	case N_AUTO_DELIM:
-		draw_auto_delim(n, x, baseline_y, role);
+		draw_auto_delim(node, x, baseline_y, role);
 		break;
 	case N_MATRIX:
-		draw_matrix(n, x, baseline_y);
+		draw_matrix(node, x, baseline_y);
 		break;
 	default:
 		break;
@@ -1026,7 +807,8 @@ static int find_checkpoint_index(TeX_Layout* L, int target_y)
 	if (!L->checkpoints || L->checkpoint_count == 0)
 		return -1;
 
-	int lo = 0, hi = L->checkpoint_count;
+	int lo = 0;
+	int hi = L->checkpoint_count;
 	while (lo < hi)
 	{
 		int mid = (lo + hi) / 2;
@@ -1039,392 +821,98 @@ static int find_checkpoint_index(TeX_Layout* L, int target_y)
 	return (lo > 0) ? (lo - 1) : -1;
 }
 
-static void rehydrate_window(TeX_Renderer* r, TeX_Layout* layout, int scroll_y)
+static void rehydrate_window(TeX_Renderer* r, TeX_Layout* layout, int top, int bottom)
 {
-	tex_metrics_invalidate_font_state();
+	int padded_top = TEX_MAX(0, top - TEX_RENDERER_PADDING);
+	int padded_bot = TEX_MIN(layout->total_height, bottom + TEX_RENDERER_PADDING);
 
-	int padded_top = scroll_y - TEX_RENDERER_PADDING;
-	int padded_bot = scroll_y + TEX_VIEWPORT_H + TEX_RENDERER_PADDING;
-	if (padded_top < 0)
-		padded_top = 0;
-	if (padded_bot > layout->total_height)
-		padded_bot = layout->total_height;
+	tex_renderer_invalidate(r);
+	if (layout->renderer)
+		tex_renderer_invalidate(layout->renderer);
 
-	pool_reset(&r->pool);
-	r->line_count = 0;
+	r->cached_layout = layout;
+	layout->renderer = r;
+
 
 	int cp_idx = find_checkpoint_index(layout, padded_top);
-	const char* src_start;
-	int y_start;
+	const char* source = cp_idx >= 0 ? layout->checkpoints[cp_idx].src_ptr : layout->source;
+	int y = cp_idx >= 0 ? layout->checkpoints[cp_idx].y_pos : 0;
+	TeX_Flow flow;
+	tex_flow_init(&flow, layout, source, y);
 
-	if (cp_idx >= 0 && layout->checkpoints)
+	r->window_y_start = y;
+	while (flow.y < padded_bot && r->line_count < TEX_RENDERER_MAX_LINES)
 	{
-		src_start = layout->checkpoints[cp_idx].src_ptr;
-		y_start = layout->checkpoints[cp_idx].y_pos;
-	}
-	else
-	{
-		src_start = layout->source;
-		y_start = 0;
-	}
-
-	DrawListBuilder line_lb;
-	dlb_init(&line_lb);
-	int16_t x_cursor = 0;
-	int16_t line_asc = 0;
-	int16_t line_desc = 0;
-	int current_y = y_start;
-	int pending_space = 0;
-
-	TeX_Stream stream;
-	tex_stream_init(&stream, src_start, -1);
-
-	TeX_Token t;
-	while (tex_stream_next(&stream, &t, &r->pool, layout))
-	{
-		if (current_y >= padded_bot)
+		if (!tex_flow_next(&flow, layout, &r->pool, &r->lines[r->line_count], 1))
 			break;
-		if (r->line_count >= TEX_RENDERER_MAX_LINES)
-			break;
-
-		switch (t.type)
-		{
-		case T_NEWLINE:
-			{
-				int eff_asc = line_asc;
-				int eff_desc = line_desc;
-				if (line_lb.head == LIST_NULL && eff_asc == 0 && eff_desc == 0)
-				{
-					eff_asc = tex_metrics_asc(FONTROLE_MAIN);
-					eff_desc = tex_metrics_desc(FONTROLE_MAIN);
-				}
-
-				if (line_lb.head != LIST_NULL || eff_asc > 0 || eff_desc > 0)
-				{
-					int h = eff_asc + eff_desc + TEX_LINE_LEADING;
-					if (h <= 0)
-						h = 1;
-
-					if (r->line_count < TEX_RENDERER_MAX_LINES)
-					{
-						TeX_Line* ln = &r->lines[r->line_count];
-						memset(ln, 0, sizeof(TeX_Line));
-						ln->content = line_lb.head;
-						ln->y = current_y;
-						ln->h = h;
-						ln->next = NULL;
-						r->line_count++;
-					}
-
-					current_y += h;
-					dlb_init(&line_lb);
-					x_cursor = 0;
-					line_asc = 0;
-					line_desc = 0;
-				}
-				pending_space = 0;
-			}
-			break;
-
-		case T_SPACE:
-			pending_space = 1;
-			break;
-
-		case T_TEXT:
-			{
-				int16_t text_w = tex_metrics_text_width_n(t.start, t.len, FONTROLE_MAIN);
-				int16_t text_asc = tex_metrics_asc(FONTROLE_MAIN);
-				int16_t text_desc = tex_metrics_desc(FONTROLE_MAIN);
-
-				if (pending_space && line_lb.head != LIST_NULL)
-				{
-					int16_t space_w = tex_metrics_text_width_n(" ", 1, FONTROLE_MAIN);
-					if (x_cursor + space_w + text_w > layout->width && line_lb.head != LIST_NULL)
-					{
-						int h = line_asc + line_desc + TEX_LINE_LEADING;
-						if (h <= 0)
-							h = 1;
-						if (r->line_count < TEX_RENDERER_MAX_LINES)
-						{
-							TeX_Line* ln = &r->lines[r->line_count];
-							memset(ln, 0, sizeof(TeX_Line));
-							ln->content = line_lb.head;
-							ln->y = current_y;
-							ln->h = h;
-							r->line_count++;
-						}
-						current_y += h;
-						dlb_init(&line_lb);
-						x_cursor = 0;
-						line_asc = 0;
-						line_desc = 0;
-					}
-					else
-					{
-						NodeRef sp_ref = pool_alloc_node(&r->pool);
-						if (sp_ref != NODE_NULL)
-						{
-							Node* sp = pool_get_node(&r->pool, sp_ref);
-							sp->type = N_TEXT;
-							StringId sid = pool_alloc_string(&r->pool, " ", 1);
-							sp->data.text.sid = sid;
-							sp->data.text.len = 1;
-							sp->w = space_w;
-							sp->asc = text_asc;
-							sp->desc = text_desc;
-							// x position calculated during drawing
-
-							dlb_push(&r->pool, &line_lb, sp_ref);
-							x_cursor = (int16_t)(x_cursor + space_w);
-							line_asc = TEX_MAX(line_asc, text_asc);
-							line_desc = TEX_MAX(line_desc, text_desc);
-						}
-					}
-				}
-				pending_space = 0;
-
-				if (x_cursor + text_w > layout->width && line_lb.head != LIST_NULL)
-				{
-					int h = line_asc + line_desc + TEX_LINE_LEADING;
-					if (h <= 0)
-						h = 1;
-					if (r->line_count < TEX_RENDERER_MAX_LINES)
-					{
-						TeX_Line* ln = &r->lines[r->line_count];
-						memset(ln, 0, sizeof(TeX_Line));
-						ln->content = line_lb.head;
-						ln->y = current_y;
-						ln->h = h;
-						r->line_count++;
-					}
-					current_y += h;
-					dlb_init(&line_lb);
-					x_cursor = 0;
-					line_asc = 0;
-					line_desc = 0;
-				}
-
-				NodeRef node_ref = pool_alloc_node(&r->pool);
-				if (node_ref != NODE_NULL)
-				{
-					Node* node = pool_get_node(&r->pool, node_ref);
-					node->type = N_TEXT;
-					StringId sid = pool_alloc_string(&r->pool, t.start, (size_t)t.len);
-					node->data.text.sid = sid;
-					node->data.text.len = (uint16_t)t.len;
-					node->w = text_w;
-					node->asc = text_asc;
-					node->desc = text_desc;
-					// x position calculated during drawing
-
-					dlb_push(&r->pool, &line_lb, node_ref);
-					x_cursor = (int16_t)(x_cursor + text_w);
-					line_asc = TEX_MAX(line_asc, text_asc);
-					line_desc = TEX_MAX(line_desc, text_desc);
-				}
-			}
-			break;
-
-		case T_MATH_INLINE:
-			{
-				NodeRef start_node = (NodeRef)r->pool.node_count;
-				NodeRef math_ref = tex_parse_math(t.start, t.len, &r->pool, layout);
-				if (math_ref != NODE_NULL)
-				{
-					Node* math = pool_get_node(&r->pool, math_ref);
-					tex_measure_range(&r->pool, start_node, (NodeRef)r->pool.node_count);
-
-					if (pending_space && line_lb.head != LIST_NULL)
-					{
-						int16_t space_w = tex_metrics_text_width_n(" ", 1, FONTROLE_MAIN);
-						if (x_cursor + space_w + math->w > layout->width && line_lb.head != LIST_NULL)
-						{
-							int h = line_asc + line_desc + TEX_LINE_LEADING;
-							if (h <= 0)
-								h = 1;
-							if (r->line_count < TEX_RENDERER_MAX_LINES)
-							{
-								TeX_Line* ln = &r->lines[r->line_count];
-								memset(ln, 0, sizeof(TeX_Line));
-								ln->content = line_lb.head;
-								ln->y = current_y;
-								ln->h = h;
-								r->line_count++;
-							}
-							current_y += h;
-							dlb_init(&line_lb);
-							x_cursor = 0;
-							line_asc = 0;
-							line_desc = 0;
-						}
-						else
-						{
-							NodeRef sp_ref = pool_alloc_node(&r->pool);
-							if (sp_ref != NODE_NULL)
-							{
-								Node* sp = pool_get_node(&r->pool, sp_ref);
-								sp->type = N_TEXT;
-								StringId sid = pool_alloc_string(&r->pool, " ", 1);
-								sp->data.text.sid = sid;
-								sp->data.text.len = 1;
-								sp->w = space_w;
-								sp->asc = tex_metrics_asc(FONTROLE_MAIN);
-								sp->desc = tex_metrics_desc(FONTROLE_MAIN);
-
-								dlb_push(&r->pool, &line_lb, sp_ref);
-								x_cursor = (int16_t)(x_cursor + space_w);
-								line_asc = TEX_MAX(line_asc, sp->asc);
-								line_desc = TEX_MAX(line_desc, sp->desc);
-							}
-						}
-					}
-					pending_space = 0;
-
-					if (x_cursor + math->w > layout->width && line_lb.head != LIST_NULL)
-					{
-						int h = line_asc + line_desc + TEX_LINE_LEADING;
-						if (h <= 0)
-							h = 1;
-						if (r->line_count < TEX_RENDERER_MAX_LINES)
-						{
-							TeX_Line* ln = &r->lines[r->line_count];
-							memset(ln, 0, sizeof(TeX_Line));
-							ln->content = line_lb.head;
-							ln->y = current_y;
-							ln->h = h;
-							r->line_count++;
-						}
-						current_y += h;
-						dlb_init(&line_lb);
-						x_cursor = 0;
-						line_asc = 0;
-						line_desc = 0;
-					}
-
-					// x position calculated during drawing
-					dlb_push(&r->pool, &line_lb, math_ref);
-					x_cursor = (int16_t)(x_cursor + math->w);
-					line_asc = TEX_MAX(line_asc, math->asc);
-					line_desc = TEX_MAX(line_desc, math->desc);
-				}
-			}
-			break;
-
-		case T_MATH_DISPLAY:
-			{
-				if (line_lb.head != LIST_NULL)
-				{
-					int h = line_asc + line_desc + TEX_LINE_LEADING;
-					if (h <= 0)
-						h = 1;
-					if (r->line_count < TEX_RENDERER_MAX_LINES)
-					{
-						TeX_Line* ln = &r->lines[r->line_count];
-						memset(ln, 0, sizeof(TeX_Line));
-						ln->content = line_lb.head;
-						ln->y = current_y;
-						ln->h = h;
-						r->line_count++;
-					}
-					current_y += h;
-					dlb_init(&line_lb);
-					x_cursor = 0;
-					line_asc = 0;
-					line_desc = 0;
-				}
-
-				NodeRef start_node = (NodeRef)r->pool.node_count;
-				NodeRef math_ref = tex_parse_math(t.start, t.len, &r->pool, layout);
-				if (math_ref != NODE_NULL)
-				{
-					Node* math = pool_get_node(&r->pool, math_ref);
-					tex_measure_range(&r->pool, start_node, (NodeRef)r->pool.node_count);
-
-					// Center display math
-					int16_t center_x = (int16_t)((layout->width - math->w) / 2);
-					if (center_x < 0)
-						center_x = 0;
-					// x position calculated during drawing (centered via x_offset in TeX_Line)
-					dlb_push(&r->pool, &line_lb, math_ref);
-					line_asc = math->asc;
-					line_desc = math->desc;
-
-					int h = line_asc + line_desc + TEX_LINE_LEADING;
-					if (h <= 0)
-						h = 1;
-					if (r->line_count < TEX_RENDERER_MAX_LINES)
-					{
-						TeX_Line* ln = &r->lines[r->line_count];
-						memset(ln, 0, sizeof(TeX_Line));
-						ln->content = line_lb.head;
-						ln->x_offset = center_x; // center display math
-						ln->y = current_y;
-						ln->h = h;
-						r->line_count++;
-					}
-					current_y += h;
-					dlb_init(&line_lb);
-					x_cursor = 0;
-					line_asc = 0;
-					line_desc = 0;
-				}
-				pending_space = 0;
-			}
-			break;
-
-		case T_EOF:
-			break;
-		}
-	}
-
-	if (line_lb.head != LIST_NULL && r->line_count < TEX_RENDERER_MAX_LINES)
-	{
-		int h = line_asc + line_desc + TEX_LINE_LEADING;
-		if (h <= 0)
-			h = 1;
-		TeX_Line* ln = &r->lines[r->line_count];
-		memset(ln, 0, sizeof(TeX_Line));
-		ln->content = line_lb.head;
-		ln->y = current_y;
-		ln->h = h;
 		r->line_count++;
 	}
 
-	r->window_y_start = padded_top;
-	r->window_y_end = padded_bot;
-	r->cached_layout = layout;
+	r->window_y_end = flow.y;
+	if (r->line_count == TEX_RENDERER_MAX_LINES && flow.y < bottom)
+		TEX_SET_ERROR(layout, TEX_ERR_OOM, "Renderer line capacity exhausted", flow.y);
+}
+
+static void set_draw_palette(const uint8_t* palette)
+{
+	g_draw_palette = palette;
+	uint16_t background = gfx_palette[palette[0]];
+	uint16_t ink = gfx_palette[palette[3]];
+
+	for (unsigned int shade = 1; shade < 3; ++shade)
+	{
+		uint16_t color = 0;
+		for (unsigned int shift = 0; shift <= 10; shift += 5)
+		{
+			unsigned int background_component = ((unsigned int)background >> shift) & 31u;
+			unsigned int ink_component = ((unsigned int)ink >> shift) & 31u;
+			color |= (uint16_t)(((background_component * (3u - shade) + ink_component * shade) / 3u) << shift);
+		}
+		gfx_palette[palette[shade]] = color;
+	}
 }
 
 // NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
 void tex_draw(TeX_Renderer* r, TeX_Layout* layout, int x, int y, int scroll_y)
 {
-	if (!r || !layout)
+	if (!r || !layout || !layout->fonts.main_font.data || !layout->fonts.script_font.data)
 		return;
 
-	g_draw_current_role = (FontRole)-1;
-	g_axis_y = 0;
+	tex_metrics_activate(&layout->fonts);
 
 	int vis_top = y;
 	if (vis_top < 0)
 		vis_top = 0;
 	if (vis_top > TEX_VIEWPORT_H)
 		vis_top = TEX_VIEWPORT_H;
+
 	int vis_bot = TEX_VIEWPORT_H;
 	g_draw_vis_top = vis_top;
 	g_draw_vis_bot = vis_bot;
+	gfx_region_t clip = { 0, vis_top, GFX_LCD_WIDTH, vis_bot };
+	if (!gfx_GetClipRegion(&clip))
+		return;
 
-	int viewport_top = scroll_y;
-	int viewport_bot = scroll_y + TEX_VIEWPORT_H;
+	g_draw_x0 = (int)clip.xmin;
+	g_draw_x1 = (int)clip.xmax;
+	g_draw_vis_top = TEX_MAX(vis_top, (int)clip.ymin);
+	g_draw_vis_bot = TEX_MIN(vis_bot, (int)clip.ymax);
+
+	int viewport_top = TEX_CLAMP(scroll_y + vis_top - y, 0, layout->total_height);
+	int viewport_bot = TEX_CLAMP(scroll_y + vis_bot - y, 0, layout->total_height);
 
 	int hit = (r->cached_layout == layout) && (viewport_top >= r->window_y_start) && (viewport_bot <= r->window_y_end);
 
 	if (!hit)
 	{
-		rehydrate_window(r, layout, scroll_y);
+		rehydrate_window(r, layout, viewport_top, viewport_bot);
 	}
 
 	// pool context for draw functions
 	g_draw_pool = &r->pool;
+	gfx_Wait();
+	g_draw_pixels = &gfx_vbuffer[0][0];
+	set_draw_palette(layout->cfg.palette);
 
 	for (int i = 0; i < r->line_count; i++)
 	{
@@ -1437,46 +925,23 @@ void tex_draw(TeX_Renderer* r, TeX_Layout* layout, int x, int y, int scroll_y)
 		if (line_screen_top >= vis_bot)
 			break;
 
-		int line_asc = 0;
-		int line_desc = 0;
-		for (ListId bid = ln->content; bid != LIST_NULL;)
-		{
-			TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-			if (!block)
-				break;
-			for (uint16_t j = 0; j < block->count; j++)
-			{
-				Node* n = pool_get_node(g_draw_pool, block->items[j]);
-				if (n)
-				{
-					line_asc = TEX_MAX(line_asc, n->asc);
-					line_desc = TEX_MAX(line_desc, n->desc);
-				}
-			}
-			bid = block->next;
-		}
-		int baseline = line_screen_top + line_asc;
+		int baseline = line_screen_top + ln->asc;
 		TexBaseline baseline_y = { baseline };
 
-		g_axis_y = baseline - tex_metrics_math_axis();
 
 		// draw all nodes in the line content, calculating x positions on-the-fly
 		int cur_x = x + ln->x_offset; // x_offset provides centering for display math
-		for (ListId bid = ln->content; bid != LIST_NULL;)
+		for (ListId block_id = ln->content; block_id != LIST_NULL;)
 		{
-			TexListBlock* block = pool_get_list_block(g_draw_pool, bid);
-			if (!block)
-				break;
+			TexListBlock* block = pool_get_list_block(g_draw_pool, block_id);
 			for (uint16_t j = 0; j < block->count; j++)
 			{
-				Node* n = pool_get_node(g_draw_pool, block->items[j]);
-				if (!n)
-					continue;
+				Node* node = pool_get_node(g_draw_pool, block->items[j]);
 				TexCoord node_x = { cur_x };
-				draw_node(n, node_x, baseline_y, FONTROLE_MAIN);
-				cur_x += n->w;
+				draw_node(node, node_x, baseline_y);
+				cur_x += node->w;
 			}
-			bid = block->next;
+			block_id = block->next;
 		}
 
 		if (r->cached_layout && ln->y + ln->h > r->window_y_end)

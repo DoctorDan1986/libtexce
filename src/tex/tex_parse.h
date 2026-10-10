@@ -10,10 +10,13 @@ extern "C" {
 
 // Parse a math expression.
 // pool: UnifiedPool for node and string allocation
-// layout: for error reporting
-// errors are reported via TEX_SET_ERROR on the layout.
-// returns the root N_MATH node ref on success, NODE_NULL on error.
-NodeRef tex_parse_math(const char* input, int len, UnifiedPool* pool, TeX_Layout* layout);
+// layout: required error state. NULL is rejected without parsing.
+// display: select display style. descendants derive their TeX size/cramped style.
+// With a layout, every failure sets its error and returns NODE_NULL.
+// Success returns an N_MATH root, including for an empty expression.
+// Required child nodes are present on success, optional arguments and empty
+// matrix cells may be NODE_NULL, while empty groups have an N_MATH node.
+NodeRef tex_parse_math(const char* input, int len, UnifiedPool* pool, TeX_Layout* layout, bool display);
 
 #ifdef __cplusplus
 }

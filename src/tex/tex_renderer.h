@@ -24,7 +24,7 @@ typedef struct TeX_Renderer
 	struct TeX_Layout* cached_layout; // layout currently hydrated (for hit check)
 } TeX_Renderer;
 
-// invalidate cached window (forces rehydration on next draw)
+// Invalidate a non NULL renderers cached window, forcing rehydration on next draw
 void tex_renderer_invalidate(TeX_Renderer* r);
 
 #ifdef __cplusplus

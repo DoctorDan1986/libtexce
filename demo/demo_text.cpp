@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include <debug.h>
-#include <fontlibc.h>
 #include <graphx.h>
 #include <keypadc.h>
 #include <tice.h>
@@ -94,14 +93,15 @@ int main(void)
 
 	dbg_printf("graphics initialized\n");
 
-	// 2. Load Fonts (Guaranteed Safety Check)
-	// We explicitly check if the Font Packs are installed on the calculator.
-	fontlib_font_t* font_main = fontlib_GetFontByIndex("TeXFonts", 0);
-	fontlib_font_t* font_script = fontlib_GetFontByIndex("TeXScrpt", 0);
+	// 2. Borrow the font payloads from their AppVars.
+	TeX_Font font_main = {};
+	TeX_Font font_script = {};
+	bool main_loaded = tex_font_open(&font_main, "TeXFonts");
+	bool script_loaded = tex_font_open(&font_script, "TeXScrpt");
 
 	dbg_printf("font routine executed\n");
 
-	if (!font_main || !font_script)
+	if (!main_loaded || !script_loaded)
 	{
 		dbg_printf("fonts not loaded\n");
 		// Graceful failure if AppVars are missing
@@ -110,10 +110,10 @@ int main(void)
 		gfx_SetTextXY(10, 10);
 		gfx_PrintString("Error: Missing Font Packs!");
 		gfx_SetTextXY(10, 25);
-		if (!font_main)
+		if (!main_loaded)
 			gfx_PrintString("- TeXFonts.8xv missing");
 		gfx_SetTextXY(10, 35);
-		if (!font_script)
+		if (!script_loaded)
 			gfx_PrintString("- TeXScrpt.8xv missing");
 
 		gfx_SetTextXY(10, 60);
@@ -127,39 +127,15 @@ int main(void)
 
 	dbg_printf("fonts loaded\n");
 
-	// 3. Configure Engine Global State
-	// Provide the loaded handles to the engine for Direct Rendering
-	tex_draw_set_fonts(font_main, font_script);
-
-	dbg_printf("engine configured\n");
-
-	// Configure FontLib for drawing
-	fontlib_SetTransparency(true);
-	fontlib_SetForegroundColor(COL_FG);
-	fontlib_SetBackgroundColor(COL_BG);
-
-	dbg_printf("fontlib configured\n");
-
-	// 4. Prepare Content
-	// We must copy the const string to a mutable buffer because tex_format
-	// modifies the input string in-place for tokenization.
+	// 4. Prepare Content (borrowed for the layout's lifetime)
 	const char* source_text = demo_texts_get(0);
-	size_t len = strlen(source_text);
-	char* input_buffer = static_cast<char*>(malloc(len + 1));
-	dbg_printf("input buffer allocated\n");
-	if (!input_buffer)
-	{
-		dbg_printf("input buffer allocation failed\n");
-		return 1; // OOM check
-	}
-	strncpy(input_buffer, source_text, len + 1);
-	dbg_printf("input buffer copied\n");
 
 	// 5. Format Layout
 	TeX_Config cfg = {
-		.color_fg = COL_FG,
-		.color_bg = COL_BG,
-		.font_pack = "TeXFonts", // Logic handled manually above, but config keeps struct happy
+		.palette = { 255, 254, 253, 0 },
+		.justify = true,
+		.font_main = font_main,
+		.font_script = font_script,
 		.error_callback = nullptr,
 		.error_userdata = nullptr
 	};
@@ -170,7 +146,7 @@ int main(void)
 
 	// Format
 	dbg_printf("formatting layout\n");
-	TeX_Layout* layout = tex_format(input_buffer, content_width, &cfg);
+	TeX_Layout* layout = tex_format(source_text, content_width, &cfg);
 	dbg_printf("layout formatted\n");
 
 	// Create renderer for windowed drawing
@@ -179,7 +155,6 @@ int main(void)
 	{
 		dbg_printf("renderer creation failed\n");
 		tex_free(layout);
-		free(input_buffer);
 		gfx_End();
 		return 1;
 	}
@@ -216,7 +191,7 @@ int main(void)
 			scroll_y = max_scroll;
 
 		// Draw Frame
-		gfx_FillScreen(COL_BG);
+		gfx_FillScreen(cfg.palette[0]);
 
 		if (layout)
 		{
@@ -239,7 +214,6 @@ int main(void)
 	tex_renderer_destroy(renderer);
 	if (layout)
 		tex_free(layout);
-	free(input_buffer); // Free buffer AFTER layout is freed
 	gfx_End();
 
 #ifndef __TICE__

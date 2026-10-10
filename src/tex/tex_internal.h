@@ -6,6 +6,8 @@
 
 #include "tex_pool.h"
 #include "tex_types.h"
+#include "tex_fonts.h"
+#include "tex_token.h"
 
 // ==================================
 // Debug Configuration
@@ -24,26 +26,9 @@
 #define TEX_VIEWPORT_H 240
 #define TEX_BASELINE_GAP 1
 #define TEX_RULE_THICKNESS 1
-#define TEX_FRAC_XPAD 2
-#define TEX_FRAC_YPAD 1
-#define TEX_FRAC_OUTER_PAD 1
 #define TEX_ACCENT_GAP 1
-#define TEX_SQRT_HEAD_XPAD 1
-#define TEX_SQRT_INDEX_KERNING (-1) // horizontal overlapping (negative) or spacing (positive)
-#define TEX_SQRT_INDEX_YSHIFT 2 // vertical shift for index above radical
-#define TEX_SCRIPT_XPAD 1
-
-#define TEX_SCRIPT_XPAD 1
-#define TEX_SCRIPT_SUP_RAISE 5
-#define TEX_SCRIPT_SUB_LOWER 5
 #define TEX_LINE_LEADING 1
 #define TEX_MATH_ATOMIC_WRAP 1
-
-#define TEX_AXIS_BIAS_INTEGRAL (-2)
-#define TEX_AXIS_BIAS_SUM 0
-#define TEX_AXIS_BIAS_PROD 0
-#define TEX_BIGOP_OVERLAP 2
-#define TEX_MULTIOP_KERN 1
 
 #define TEX_DELIM_WIDTH_FACTOR 4
 #define TEX_DELIM_MIN_WIDTH 4
@@ -67,6 +52,9 @@
 // Node.flags constants
 #define TEX_FLAG_MATHF_DISPLAY 0x01 // Display-mode math (centered)
 #define TEX_FLAG_SCRIPT 0x02 // Node measured with script role
+#define TEX_FLAG_CRAMPED 0x04 // Lower superscript placement in cramped math
+#define TEX_FLAG_OPERATOR 0x08 // Upright named mathematical operator
+#define TEX_FLAG_LIMITS 0x10 // Operator uses above/below limits in display style
 
 // ==================================
 // Node Types
@@ -84,7 +72,6 @@ typedef enum
 	N_SCRIPT,
 	N_OVERLAY,
 	N_SPANDECO,
-	N_FUNC_LIM,
 	N_MULTIOP,
 	N_AUTO_DELIM,
 	N_MATRIX
@@ -110,8 +97,6 @@ typedef enum
 
 typedef enum
 {
-	DECO_OVERLINE = 1,
-	DECO_UNDERLINE = 2,
 	DECO_OVERBRACE = 3,
 	DECO_UNDERBRACE = 4
 } DecoType;
@@ -144,8 +129,7 @@ typedef struct Node
 		uint16_t glyph;
 		struct
 		{
-			int16_t width;
-			uint8_t em_mul;
+			int16_t mu; // Explicit math glue, 18 mu per em
 		} space;
 		// N_MATH, N_ROOT, N_LINE: sequence container with ListId
 		struct
@@ -176,10 +160,6 @@ typedef struct Node
 			NodeRef label; // optional (NODE_NULL if none)
 			uint8_t deco_type; // DecoType
 		} spandeco;
-		struct
-		{
-			NodeRef limit;
-		} func_lim;
 		struct
 		{
 			uint8_t count; // number of operators (2 for \iint, etc)
@@ -241,10 +221,9 @@ typedef struct TeX_Line
 {
 	int y;
 	int h;
+	int asc;
 	int x_offset; // horizontal offset for centered content (display math)
 	ListId content; // ListId for nodes in this line
-	int child_count;
-	struct TeX_Line* next; // kept for now, will be array in renderer
 } TeX_Line;
 
 // =======================================
@@ -277,20 +256,16 @@ typedef struct
 // ==================================
 typedef struct TeX_Layout
 {
-	// Config (copied from TeX_Config at format time)
-	struct
-	{
-		uint8_t fg, bg;
-		const char* pack;
-		TeX_ErrorLogFn error_callback;
-		void* error_userdata;
-	} cfg;
+	TeX_Config cfg;
+	TexFontHandles fonts;
 
 	int width;
 	int total_height;
 
 	// source buffer pointer (immutable after format)
 	const char* source;
+	const char* source_end;
+	struct TeX_Renderer* renderer; // renderer currently caching this layout, if any
 
 	TeX_Checkpoint* checkpoints;
 	int checkpoint_count;
@@ -303,6 +278,25 @@ typedef struct TeX_Layout
 	unsigned debug_flags;
 #endif
 } TeX_Layout;
+
+typedef struct
+{
+	TeX_Stream stream;
+	TeX_Token token;
+	const char* token_source;
+	NodeRef node;
+	int w;
+	int asc;
+	int desc;
+	int y;
+	int has_token;
+	int eof;
+	int failed;
+} TeX_Flow;
+
+void tex_flow_init(TeX_Flow* flow, const TeX_Layout* layout, const char* source, int y);
+const char* tex_flow_position(const TeX_Flow* flow);
+int tex_flow_next(TeX_Flow* flow, TeX_Layout* layout, UnifiedPool* pool, TeX_Line* line, int retain);
 
 
 // =======================================
@@ -343,7 +337,7 @@ int tex_draw_log_get_range(TexDrawOp* out, int start_index, int count);
 #define TEX_INVOKE_CALLBACK_(L, LVL, MSG, FILE, LINE)                                                                  \
 	do                                                                                                                 \
 	{                                                                                                                  \
-		if ((L) && (L)->cfg.error_callback)                                                                            \
+		if ((L)->cfg.error_callback)                                                                                   \
 		{                                                                                                              \
 			(L)->cfg.error_callback((L)->cfg.error_userdata, (LVL), (MSG), (FILE), (LINE));                            \
 		}                                                                                                              \
@@ -354,7 +348,7 @@ int tex_draw_log_get_range(TexDrawOp* out, int start_index, int count);
 #define TEX_SET_ERROR(layout, ecode, emsg, eval)                                                                       \
 	do                                                                                                                 \
 	{                                                                                                                  \
-		if ((layout) && (layout)->error.code == TEX_OK)                                                                \
+		if ((layout)->error.code == TEX_OK)                                                                            \
 		{                                                                                                              \
 			(layout)->error.code = (ecode);                                                                            \
 			(layout)->error.msg = (emsg);                                                                              \
@@ -365,21 +359,11 @@ int tex_draw_log_get_range(TexDrawOp* out, int start_index, int count);
 		}                                                                                                              \
 	}                                                                                                                  \
 	while (0)
-
-#define TEX_SET_WARNING(layout, wmsg)                                                                                  \
-	do                                                                                                                 \
-	{                                                                                                                  \
-		if ((layout))                                                                                                  \
-		{                                                                                                              \
-			TEX_INVOKE_CALLBACK_((layout), 1, (wmsg), __FILE__, __LINE__);                                             \
-		}                                                                                                              \
-	}                                                                                                                  \
-	while (0)
 #else
 #define TEX_SET_ERROR(layout, ecode, emsg, eval)                                                                       \
 	do                                                                                                                 \
 	{                                                                                                                  \
-		if ((layout) && (layout)->error.code == TEX_OK)                                                                \
+		if ((layout)->error.code == TEX_OK)                                                                            \
 		{                                                                                                              \
 			(layout)->error.code = (ecode);                                                                            \
 			(layout)->error.msg = (emsg);                                                                              \
@@ -388,28 +372,8 @@ int tex_draw_log_get_range(TexDrawOp* out, int start_index, int count);
 		}                                                                                                              \
 	}                                                                                                                  \
 	while (0)
-
-#define TEX_SET_WARNING(layout, wmsg)                                                                                  \
-	do                                                                                                                 \
-	{                                                                                                                  \
-		if ((layout))                                                                                                  \
-		{                                                                                                              \
-			TEX_INVOKE_CALLBACK_((layout), 1, (wmsg), NULL, 0);                                                        \
-		}                                                                                                              \
-	}                                                                                                                  \
-	while (0)
 #endif
 
-#define TEX_HAS_ERROR(layout) ((layout) && (layout)->error.code != TEX_OK)
-
-#define TEX_CLEAR_ERROR(layout)                                                                                        \
-	do                                                                                                                 \
-	{                                                                                                                  \
-		if ((layout))                                                                                                  \
-		{                                                                                                              \
-			memset(&(layout)->error, 0, sizeof((layout)->error));                                                      \
-		}                                                                                                              \
-	}                                                                                                                  \
-	while (0)
+#define TEX_HAS_ERROR(layout) ((layout)->error.code != TEX_OK)
 
 #endif // TEX_TEX_INTERNAL_H

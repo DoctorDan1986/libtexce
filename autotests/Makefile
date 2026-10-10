@@ -33,7 +33,11 @@ all: build
 generate: $(CASEGEN_BIN)
 	@./$(CASEGEN_BIN) --out $(GENERATED_DIR)
 
-$(CASEGEN_BIN): $(CASEGEN_DIR)/generate_autotests.c $(CASEGEN_DIR)/cases.c $(CASEGEN_DIR)/cases.h
+$(CASEGEN_BIN): $(CASEGEN_DIR)/generate_autotests.c \
+                $(CASEGEN_DIR)/cases.c \
+                $(CASEGEN_DIR)/cases.h \
+                $(CASEGEN_DIR)/makefile_template.mk \
+                $(CASEGEN_DIR)/autotest_template.json
 	@$(CC) -std=c23 -O2 -Wall -Wextra -o $(CASEGEN_BIN) $(CASEGEN_DIR)/generate_autotests.c $(CASEGEN_DIR)/cases.c
 
 build: generate $(BUILD_TARGETS)

@@ -1,8 +1,10 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(libtexce C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Output executables to bin/ for easy access
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -58,8 +60,8 @@ set(TEX_CORE_SOURCES
   src/tex/tex_util.c
   src/tex/tex_pool.c
   src/tex/tex_symbols.c
-  src/tex/tex_metrics.c
   src/tex/tex_fonts.c
+  src/tex/tex_metrics.c
   src/tex/tex_token.c
   src/tex/tex_parse.c
   src/tex/tex_measure.c
@@ -113,6 +115,7 @@ if(ENABLE_HOST_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_executable(test_parse tests/test_parse.c $<TARGET_OBJECTS:tex_core>)
     add_executable(test_measure tests/test_measure.c $<TARGET_OBJECTS:tex_core>)
     add_executable(test_layout tests/test_layout.c $<TARGET_OBJECTS:tex_core>)
+    add_executable(test_fonts tests/test_fonts.c $<TARGET_OBJECTS:tex_core>)
     # add_executable(test_draw tests/test_draw.c $<TARGET_OBJECTS:tex_core>)
     add_executable(test_symbols tests/test_symbols.c $<TARGET_OBJECTS:tex_core>)
     # add_executable(test_errors tests/test_errors.c $<TARGET_OBJECTS:tex_core>)
@@ -134,9 +137,17 @@ if(ENABLE_HOST_TESTS AND NOT CMAKE_CROSSCOMPILING)
       ${CMAKE_CURRENT_SOURCE_DIR}/src/tex
       ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
-    foreach(tgt IN ITEMS test_token test_parse test_measure test_layout test_symbols test_pool)
-      target_include_directories(${tgt} PRIVATE ${_TEX_INC})
-      target_link_libraries(${tgt} PRIVATE PortCE -lm)
+    foreach(test_target IN ITEMS
+      test_token
+      test_parse
+      test_measure
+      test_layout
+      test_fonts
+      test_symbols
+      test_pool
+    )
+      target_include_directories(${test_target} PRIVATE ${_TEX_INC})
+      target_link_libraries(${test_target} PRIVATE PortCE -lm)
     endforeach()
 
     # Register tests with CTest
@@ -145,6 +156,7 @@ if(ENABLE_HOST_TESTS AND NOT CMAKE_CROSSCOMPILING)
     add_test(NAME parse   COMMAND test_parse)
     add_test(NAME measure COMMAND test_measure)
     add_test(NAME layout  COMMAND test_layout)
+    add_test(NAME fonts   COMMAND test_fonts)
     # add_test(NAME draw    COMMAND test_draw)  # disabled
     add_test(NAME symbols COMMAND test_symbols)
     # add_test(NAME errors  COMMAND test_errors)  # disabled
@@ -155,11 +167,19 @@ if(ENABLE_HOST_TESTS AND NOT CMAKE_CROSSCOMPILING)
       COMMAND $<TARGET_FILE:test_parse>
       COMMAND $<TARGET_FILE:test_measure>
       COMMAND $<TARGET_FILE:test_layout>
+      COMMAND $<TARGET_FILE:test_fonts>
       # COMMAND $<TARGET_FILE:test_draw>  # disabled
       COMMAND $<TARGET_FILE:test_symbols>
       # COMMAND $<TARGET_FILE:test_errors>  # disabled
       COMMAND $<TARGET_FILE:test_pool>
-      DEPENDS test_token test_parse test_measure test_layout test_symbols test_pool
+      DEPENDS
+        test_token
+        test_parse
+        test_measure
+        test_layout
+        test_fonts
+        test_symbols
+        test_pool
     )
   else()
     message(WARNING "ENABLE_HOST_TESTS=ON but PortCE or SDL2 not found - skipping tests")

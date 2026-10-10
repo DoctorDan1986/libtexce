@@ -1,4 +1,4 @@
 [submodule "portce"]
 	path = portce
-	url = https://github.com/adriweb/PortCE.git
-	branch = portce_v3
+	url = https://github.com/Sightem/PortCE.git
+	branch = master

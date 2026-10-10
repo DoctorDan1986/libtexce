@@ -44,30 +44,29 @@ typedef struct
 	int depth;
 	UnifiedPool* pool; // pool for node and string allocation
 	TeX_Layout* L; // for error reporting only
-	uint8_t current_role; // FONTROLE_MAIN=0 or FONTROLE_SCRIPT=1 for tagging
+	uint8_t style;
 } Parser;
 
 typedef struct
 {
 	ListId head; // first block (LIST_NULL if empty)
-	ListId tail_id; // last block id
 	TexListBlock* tail_block; // cached pointer to tail block (for fast append)
 } ListBuilder;
 
 static void lb_init(ListBuilder* lb)
 {
 	lb->head = LIST_NULL;
-	lb->tail_id = LIST_NULL;
 	lb->tail_block = NULL;
 }
 
 static void lb_push(Parser* p, ListBuilder* lb, NodeRef item)
 {
-	if (item == NODE_NULL)
+	if (TEX_HAS_ERROR(p->L))
 		return;
 
+	// NODE_NULL is a positional empty cell in matrix lists
 	// Need a new block?
-	if (lb->tail_block == NULL || lb->tail_block->count >= TEX_LIST_BLOCK_CAP)
+	if (lb->tail_block == NULL || lb->tail_block->count == TEX_LIST_BLOCK_CAP)
 	{
 		ListId new_id = pool_alloc_list_block(p->pool);
 		if (new_id == LIST_NULL)
@@ -76,11 +75,6 @@ static void lb_push(Parser* p, ListBuilder* lb, NodeRef item)
 			return;
 		}
 		TexListBlock* new_block = pool_get_list_block(p->pool, new_id);
-		if (new_block == NULL)
-		{
-			TEX_SET_ERROR(p->L, TEX_ERR_OOM, "Allocated list block is unavailable", 0);
-			return;
-		}
 
 		if (lb->head == LIST_NULL)
 		{
@@ -88,33 +82,17 @@ static void lb_push(Parser* p, ListBuilder* lb, NodeRef item)
 		}
 		else
 		{
-			TexListBlock* prev_tail = lb->tail_block;
-			if (prev_tail == NULL && lb->tail_id != LIST_NULL)
-				prev_tail = pool_get_list_block(p->pool, lb->tail_id);
-			if (prev_tail == NULL)
-			{
-				TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "List builder state corrupted", 0);
-				return;
-			}
-			prev_tail->next = new_id;
+			lb->tail_block->next = new_id;
 		}
-		lb->tail_id = new_id;
 		lb->tail_block = new_block;
 	}
 
 	// Append item to current block
-	if (lb->tail_block == NULL)
-	{
-		TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "List builder has no tail block", 0);
-		return;
-	}
 	lb->tail_block->items[lb->tail_block->count++] = item;
 }
 
 static NodeRef new_node(Parser* p, NodeType t)
 {
-	if (!p || !p->L)
-		return NODE_NULL;
 	if (TEX_HAS_ERROR(p->L))
 		return NODE_NULL;
 
@@ -126,8 +104,7 @@ static NodeRef new_node(Parser* p, NodeType t)
 	}
 	Node* n = pool_get_node(p->pool, ref);
 	n->type = (uint8_t)t;
-	if (p->current_role != 0)
-		n->flags |= TEX_FLAG_SCRIPT;
+	n->flags = p->style;
 	return ref;
 }
 
@@ -154,7 +131,7 @@ static NodeRef make_glyph(Parser* p, uint16_t code)
 {
 	if (code < 128)
 	{
-		uint16_t offset = (p->current_role == FONTROLE_SCRIPT) ? 128 : 0;
+		uint16_t offset = (p->style & TEX_FLAG_SCRIPT) ? 128 : 0;
 		return (NodeRef)(TEX_RESERVED_BASE + offset + code);
 	}
 
@@ -299,57 +276,16 @@ static NodeRef wrap_group_list(Parser* p, ListId list_head)
 	return ref;
 }
 
-static inline int is_script_marker(MTokenKind kind) { return kind == M_CARET || kind == M_UNDER; }
-
-// flush pending character run to the list builder
-// if script_follows is true: emit all but last as N_TEXT, return last char via out_script_base
-// otherwise: emit entire run as one node (N_TEXT if len>1, N_GLYPH if len==1)
-// NOLINTNEXTLINE(bugprone-easily-swappable-parameters)
-static void flush_char_run(Parser* p, const char* run_start, int run_len, int script_follows, ListBuilder* lb,
-                           NodeRef* out_script_base)
-{
-	if (out_script_base)
-		*out_script_base = NODE_NULL;
-	if (run_len <= 0)
-		return;
-
-	if (script_follows)
-	{
-		// emit all but last character as N_TEXT (if more than one char)
-		if (run_len > 1)
-		{
-			NodeRef txt = make_text(p, run_start, (size_t)(run_len - 1));
-			lb_push(p, lb, txt);
-		}
-		// last character becomes the script base (not appended yet)
-		if (out_script_base)
-		{
-			*out_script_base = make_glyph(p, (uint8_t)run_start[run_len - 1]);
-		}
-	}
-	else
-	{
-		NodeRef ref;
-		if (run_len == 1)
-		{
-			ref = make_glyph(p, (uint8_t)*run_start);
-		}
-		else
-		{
-			ref = make_text(p, run_start, (size_t)run_len);
-		}
-		lb_push(p, lb, ref);
-	}
-}
-
-static NodeRef parse_script_arg(Parser* p);
+static NodeRef parse_atom_noscript(Parser* p);
 
 static NodeRef attach_scripts(Parser* p, NodeRef base)
 {
-	if (base == NODE_NULL)
+	if (TEX_HAS_ERROR(p->L))
 		return NODE_NULL;
+
 	NodeRef sub = NODE_NULL;
 	NodeRef sup = NODE_NULL;
+
 	int again = 1;
 	while (again)
 	{
@@ -360,16 +296,13 @@ static NodeRef attach_scripts(Parser* p, NodeRef base)
 			(void)ml_next(&p->lx);
 			if (sup == NODE_NULL)
 			{
-				uint8_t saved_role = p->current_role;
-				p->current_role = 1; // FONTROLE_SCRIPT
-				sup = parse_script_arg(p);
-				p->current_role = saved_role;
+				uint8_t saved_style = p->style;
+				p->style = (saved_style & ~TEX_FLAG_MATHF_DISPLAY) | TEX_FLAG_SCRIPT;
+				sup = parse_atom_noscript(p);
+				p->style = saved_style;
 			}
-			if (sup == NODE_NULL && !TEX_HAS_ERROR(p->L))
-			{
-				TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Missing argument for superscript/subscript", 0);
+			if (TEX_HAS_ERROR(p->L))
 				return NODE_NULL;
-			}
 			again = 1;
 		}
 		else if (k.kind == M_UNDER)
@@ -377,19 +310,17 @@ static NodeRef attach_scripts(Parser* p, NodeRef base)
 			(void)ml_next(&p->lx);
 			if (sub == NODE_NULL)
 			{
-				uint8_t saved_role = p->current_role;
-				p->current_role = 1; // FONTROLE_SCRIPT
-				sub = parse_script_arg(p);
-				p->current_role = saved_role;
+				uint8_t saved_style = p->style;
+				p->style = (saved_style & ~TEX_FLAG_MATHF_DISPLAY) | TEX_FLAG_SCRIPT | TEX_FLAG_CRAMPED;
+				sub = parse_atom_noscript(p);
+				p->style = saved_style;
 			}
-			if (sub == NODE_NULL && !TEX_HAS_ERROR(p->L))
-			{
-				TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Missing argument for superscript/subscript", 0);
+			if (TEX_HAS_ERROR(p->L))
 				return NODE_NULL;
-			}
 			again = 1;
 		}
 	}
+
 	if (sub != NODE_NULL || sup != NODE_NULL)
 	{
 		NodeRef ref = new_node(p, N_SCRIPT);
@@ -406,10 +337,7 @@ static NodeRef attach_scripts(Parser* p, NodeRef base)
 
 static NodeRef parse_group(Parser* p)
 {
-	// assumes next token is '{'
-	(void)ml_next(&p->lx);
-
-	// depth guard
+	(void)ml_next(&p->lx); // consume '{'
 	p->depth++;
 	if (p->depth > TEX_PARSE_MAX_DEPTH)
 	{
@@ -418,109 +346,27 @@ static NodeRef parse_group(Parser* p)
 		return NODE_NULL;
 	}
 
-	ListBuilder lb;
-	lb_init(&lb);
-
-	// pending run of contiguous characters
-	const char* run_start = NULL;
-	int run_len = 0;
-
-	while (1)
+	ListId head = parse_math_list(p);
+	if (ml_peek(&p->lx).kind == M_RBRACE)
 	{
-		MToken pk = ml_peek(&p->lx);
-		if (pk.kind == M_RBRACE || pk.kind == M_EOF)
-		{
-			if (pk.kind == M_RBRACE)
-				(void)ml_next(&p->lx); // consume '}'
-			break;
-		}
-		if (TEX_HAS_ERROR(p->L))
-			break;
-
-		if (pk.kind == M_CHAR)
-		{
-			// accumulate character
-			if (run_len == 0)
-			{
-				run_start = pk.start;
-				run_len = 1;
-			}
-			else if (pk.start == run_start + run_len)
-			{
-				run_len++;
-			}
-			else
-			{
-				flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-				run_start = pk.start;
-				run_len = 1;
-			}
-			ml_next(&p->lx);
-
-			MToken next = ml_peek(&p->lx);
-			if (is_script_marker(next.kind))
-			{
-				NodeRef base = NODE_NULL;
-				flush_char_run(p, run_start, run_len, 1, &lb, &base);
-				run_start = NULL;
-				run_len = 0;
-
-				if (base != NODE_NULL)
-				{
-					base = attach_scripts(p, base);
-					lb_push(p, &lb, base);
-				}
-			}
-		}
-		else if (is_script_marker(pk.kind))
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
-
-			ml_next(&p->lx);
-			NodeRef n = make_glyph(p, (pk.kind == M_CARET) ? '^' : '_');
-			lb_push(p, &lb, n);
-		}
-		else
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
-
-			NodeRef it = parse_atom(p);
-			if (TEX_HAS_ERROR(p->L))
-				break;
-			if (it == NODE_NULL)
-				break;
-
-			MToken next = ml_peek(&p->lx);
-			if (is_script_marker(next.kind))
-			{
-				it = attach_scripts(p, it);
-			}
-
-			lb_push(p, &lb, it);
-		}
+		(void)ml_next(&p->lx);
+	}
+	else
+	{
+		TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Unclosed '{' in math group", 0);
 	}
 
-	flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-
 	p->depth--;
-	return wrap_group_list(p, lb.head);
+	return wrap_group_list(p, head);
 }
 
 // parse an optional bracketed argument [ ... ]; returns NODE_NULL if not present
 static NodeRef parse_optional_bracket_arg(Parser* p)
 {
-	MToken pk = ml_peek(&p->lx);
-	if (pk.kind != M_LBRACKET)
+	if (ml_peek(&p->lx).kind != M_LBRACKET)
 		return NODE_NULL;
 
-	// consume '['
 	(void)ml_next(&p->lx);
-
-	// depth guard
 	p->depth++;
 	if (p->depth > TEX_PARSE_MAX_DEPTH)
 	{
@@ -532,104 +378,36 @@ static NodeRef parse_optional_bracket_arg(Parser* p)
 	ListBuilder lb;
 	lb_init(&lb);
 
-	// pending character run
-	const char* run_start = NULL;
-	int run_len = 0;
-
-	while (1)
+	while (!TEX_HAS_ERROR(p->L))
 	{
-		MToken pk2 = ml_peek(&p->lx);
-		if (pk2.kind == M_RBRACKET)
+		MToken pk = ml_peek(&p->lx);
+		if (pk.kind == M_RBRACKET)
 		{
-			(void)ml_next(&p->lx); // consume ']'
+			(void)ml_next(&p->lx);
 			break;
 		}
-		if (pk2.kind == M_EOF)
+		if (pk.kind == M_EOF)
 		{
 			TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Unclosed '[' in optional argument", 0);
-			p->depth--;
-			return NODE_NULL;
-		}
-		if (TEX_HAS_ERROR(p->L))
 			break;
-
-		if (pk2.kind == M_CHAR)
-		{
-			if (run_len == 0)
-			{
-				run_start = pk2.start;
-				run_len = 1;
-			}
-			else if (pk2.start == run_start + run_len)
-			{
-				run_len++;
-			}
-			else
-			{
-				flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-				run_start = pk2.start;
-				run_len = 1;
-			}
-			ml_next(&p->lx);
-
-			MToken next = ml_peek(&p->lx);
-			if (is_script_marker(next.kind))
-			{
-				NodeRef base = NODE_NULL;
-				flush_char_run(p, run_start, run_len, 1, &lb, &base);
-				run_start = NULL;
-				run_len = 0;
-
-				if (base != NODE_NULL)
-				{
-					base = attach_scripts(p, base);
-					lb_push(p, &lb, base);
-				}
-			}
 		}
-		else if (is_script_marker(pk2.kind))
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
 
-			ml_next(&p->lx);
-			NodeRef n = make_glyph(p, (pk2.kind == M_CARET) ? '^' : '_');
-			lb_push(p, &lb, n);
-		}
-		else
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
-
-			NodeRef item = parse_atom(p);
-			if (TEX_HAS_ERROR(p->L))
-			{
-				p->depth--;
-				return NODE_NULL;
-			}
-			if (item == NODE_NULL)
-				break;
-
-			lb_push(p, &lb, item);
-		}
+		NodeRef item = parse_atom(p);
+		lb_push(p, &lb, item);
 	}
 
-	flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-
 	p->depth--;
-
-	// treat empty [] as no index
 	if (lb.head == LIST_NULL)
 		return NODE_NULL;
-
 	return wrap_group_list(p, lb.head);
 }
 
 // parse one atom without absorbing trailing ^/_ scripts
 static NodeRef parse_atom_noscript(Parser* p)
 {
+	if (TEX_HAS_ERROR(p->L))
+		return NODE_NULL;
+
 	MToken t = ml_peek(&p->lx);
 	if (t.kind == M_LBRACE)
 		return parse_group(p);
@@ -654,19 +432,9 @@ static NodeRef parse_atom_noscript(Parser* p)
 		(void)ml_next(&p->lx);
 		return make_glyph(p, (t.kind == M_CARET) ? '^' : '_');
 	}
-	if (t.kind == M_RBRACE || t.kind == M_EOF)
-		return NODE_NULL;
 	(void)ml_next(&p->lx);
-	TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Unexpected token in math expression", 0);
+	TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Expected math atom", 0);
 	return NODE_NULL;
-}
-
-static NodeRef parse_script_arg(Parser* p)
-{
-	MToken pk = ml_peek(&p->lx);
-	if (pk.kind == M_LBRACE)
-		return parse_group(p);
-	return parse_atom_noscript(p);
 }
 
 // parse one matrix cell until delimiter (&, \\) or \end
@@ -676,136 +444,30 @@ static NodeRef parse_matrix_cell(Parser* p)
 {
 	ListBuilder lb;
 	lb_init(&lb);
-
-	const char* run_start = NULL;
-	int run_len = 0;
 	int item_count = 0;
 	NodeRef first_item = NODE_NULL;
 
-	while (1)
+	while (!TEX_HAS_ERROR(p->L))
 	{
 		MToken pk = ml_peek(&p->lx);
-
-		// stop on cell/row delimiters or environment end
 		if (pk.kind == M_AMPERSAND || pk.kind == M_DOUBLE_BACKSLASH || pk.kind == M_EOF || pk.kind == M_RBRACE)
 			break;
-
 		if (pk.kind == M_CMD && pk.len == 3 && strncmp(pk.start, "end", 3) == 0)
 			break;
 
+		NodeRef item = parse_atom(p);
 		if (TEX_HAS_ERROR(p->L))
 			break;
-
-		if (pk.kind == M_CHAR)
-		{
-			if (run_len == 0)
-			{
-				run_start = pk.start;
-				run_len = 1;
-			}
-			else if (pk.start == run_start + run_len)
-			{
-				run_len++;
-			}
-			else
-			{
-				flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-				if (item_count == 0 && lb.head != LIST_NULL)
-				{
-					TexListBlock* blk = pool_get_list_block(p->pool, lb.head);
-					if (blk && blk->count > 0)
-						first_item = blk->items[0];
-				}
-				item_count++;
-				run_start = pk.start;
-				run_len = 1;
-			}
-			ml_next(&p->lx);
-
-			MToken next = ml_peek(&p->lx);
-			if (is_script_marker(next.kind))
-			{
-				NodeRef base = NODE_NULL;
-				flush_char_run(p, run_start, run_len, 1, &lb, &base);
-				run_start = NULL;
-				run_len = 0;
-				if (base != NODE_NULL)
-				{
-					base = attach_scripts(p, base);
-					lb_push(p, &lb, base);
-					if (item_count == 0)
-						first_item = base;
-					item_count++;
-				}
-			}
-		}
-		else if (is_script_marker(pk.kind))
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			if (run_len > 0)
-			{
-				if (item_count == 0 && lb.head != LIST_NULL)
-				{
-					TexListBlock* blk = pool_get_list_block(p->pool, lb.head);
-					if (blk && blk->count > 0)
-						first_item = blk->items[0];
-				}
-				item_count++;
-			}
-			run_start = NULL;
-			run_len = 0;
-			ml_next(&p->lx);
-			NodeRef n = make_glyph(p, (pk.kind == M_CARET) ? '^' : '_');
-			lb_push(p, &lb, n);
-			if (item_count == 0)
-				first_item = n;
-			item_count++;
-		}
-		else
-		{
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			if (run_len > 0)
-			{
-				if (item_count == 0 && lb.head != LIST_NULL)
-				{
-					TexListBlock* blk = pool_get_list_block(p->pool, lb.head);
-					if (blk && blk->count > 0)
-						first_item = blk->items[0];
-				}
-				item_count++;
-			}
-			run_start = NULL;
-			run_len = 0;
-			NodeRef n = parse_atom(p);
-			if (n == NODE_NULL || TEX_HAS_ERROR(p->L))
-				break;
-			lb_push(p, &lb, n);
-			if (item_count == 0)
-				first_item = n;
-			item_count++;
-		}
-	}
-
-	// flush any remaining characters
-	if (run_len > 0)
-	{
-		flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-		if (item_count == 0 && lb.head != LIST_NULL)
-		{
-			TexListBlock* blk = pool_get_list_block(p->pool, lb.head);
-			if (blk && blk->count > 0)
-				first_item = blk->items[0];
-		}
+		lb_push(p, &lb, item);
+		if (item_count == 0)
+			first_item = item;
 		item_count++;
 	}
 
-	// return directly if single item
 	if (item_count == 0)
 		return NODE_NULL;
 	if (item_count == 1)
 		return first_item;
-
-	// wrap in N_MATH
 	return wrap_group_list(p, lb.head);
 }
 
@@ -824,7 +486,10 @@ static NodeRef parse_matrix_env(Parser* p, DelimType delim_type)
 	int col = 0;
 	int max_cols = 0;
 
-	while (1)
+	uint8_t saved_style = p->style;
+	p->style &= ~TEX_FLAG_MATHF_DISPLAY;
+
+	while (!TEX_HAS_ERROR(p->L))
 	{
 		MToken pk = ml_peek(&p->lx);
 		if (pk.kind == M_EOF)
@@ -833,9 +498,8 @@ static NodeRef parse_matrix_env(Parser* p, DelimType delim_type)
 			break;
 		}
 
-		if (pk.kind == M_CMD && pk.len == 3 && strncmp(pk.start, "end", 3) == 0)
+		if (col == 0 && pk.kind == M_CMD && pk.len == 3 && strncmp(pk.start, "end", 3) == 0)
 			break;
-
 
 		NodeRef cell = parse_matrix_cell(p);
 		lb_push(p, &lb, cell);
@@ -864,6 +528,7 @@ static NodeRef parse_matrix_env(Parser* p, DelimType delim_type)
 			break;
 		}
 	}
+	p->style = saved_style;
 
 	// NOW allocate the matrix node (after all cells have been parsed/allocated)
 	NodeRef ref = new_node(p, N_MATRIX);
@@ -1140,7 +805,6 @@ static const struct
 	{ "lg", 2 }, // SYMC_FUNC_LG
 	{ "coth", 4 }, // SYMC_FUNC_COTH
 };
-static const int func_names_count = (int)(sizeof(g_func_text) / sizeof(g_func_text[0]));
 
 static NodeRef parse_text_arg(Parser* p)
 {
@@ -1232,7 +896,6 @@ static NodeRef parse_text_arg(Parser* p)
 static NodeRef parse_command(Parser* p, const char* name, int len)
 {
 	SymbolDesc d;
-	memset(&d, 0, sizeof(d));
 	int found = texsym_find(name, (size_t)len, &d);
 
 	if (!found)
@@ -1248,27 +911,34 @@ static NodeRef parse_command(Parser* p, const char* name, int len)
 			NodeRef ref = new_node(p, N_SPACE);
 			if (ref == NODE_NULL)
 				return NODE_NULL;
-			Node* sp = pool_get_node(p->pool, ref);
-			int16_t w = 0;
+			Node* space = pool_get_node(p->pool, ref);
+			int16_t mu = 0;
 			if (d.code == SYMC_THINSPACE)
-				w = 2; // \,
+			{
+				mu = 3;
+			}
 			else if (d.code == SYMC_MEDSPACE)
-				w = 3; // \:
+			{
+				mu = 4;
+			}
 			else if (d.code == SYMC_THICKSPACE)
-				w = 4; // \;
+			{
+				mu = 5;
+			}
 			else if (d.code == SYMC_NEGSPACE)
-				w = -1; // \!
+			{
+				mu = -3;
+			}
 			else if (d.code == SYMC_QUAD)
 			{
-				sp->data.space.em_mul = 1;
-				w = 0;
+				mu = 18;
 			}
 			else if (d.code == SYMC_QQUAD)
 			{
-				sp->data.space.em_mul = 2;
-				w = 0;
+				mu = 36;
 			}
-			sp->data.space.width = w;
+
+			space->data.space.mu = mu;
 			return ref;
 		}
 	case SYM_ACCENT:
@@ -1323,48 +993,79 @@ static NodeRef parse_command(Parser* p, const char* name, int len)
 			}
 			if (d.code == SYMC_FRAC)
 			{
-				// \frac{num}{den} - both args are script context
-				uint8_t saved_role = p->current_role;
-				p->current_role = 1; // FONTROLE_SCRIPT
-				NodeRef num = NODE_NULL;
-				NodeRef den = NODE_NULL;
+				uint8_t saved_style = p->style;
+				p->style = saved_style & ~TEX_FLAG_MATHF_DISPLAY;
+				if (!(saved_style & TEX_FLAG_MATHF_DISPLAY))
+				{
+					p->style |= TEX_FLAG_SCRIPT;
+				}
+
+				NodeRef numerator = NODE_NULL;
+				NodeRef denominator = NODE_NULL;
 				if (ml_peek(&p->lx).kind == M_LBRACE)
-					num = parse_group(p);
+				{
+					numerator = parse_group(p);
+				}
 				else
-					num = parse_atom(p);
+				{
+					numerator = parse_atom(p);
+				}
+
+				p->style |= TEX_FLAG_CRAMPED;
 				if (ml_peek(&p->lx).kind == M_LBRACE)
-					den = parse_group(p);
+				{
+					denominator = parse_group(p);
+				}
 				else
-					den = parse_atom(p);
-				p->current_role = saved_role;
+				{
+					denominator = parse_atom(p);
+				}
+				p->style = saved_style;
+
 				NodeRef ref = new_node(p, N_FRAC);
 				if (ref == NODE_NULL)
 					return NODE_NULL;
-				Node* f = pool_get_node(p->pool, ref);
-				f->data.frac.num = num;
-				f->data.frac.den = den;
+
+				Node* fraction = pool_get_node(p->pool, ref);
+				fraction->data.frac.num = numerator;
+				fraction->data.frac.den = denominator;
 				return ref;
 			}
 			if (d.code == SYMC_BINOM)
 			{
-				uint8_t saved_role = p->current_role;
-				p->current_role = 1; // FONTROLE_SCRIPT
-				NodeRef num = NODE_NULL;
-				NodeRef den = NODE_NULL;
+				uint8_t saved_style = p->style;
+				p->style = saved_style & ~TEX_FLAG_MATHF_DISPLAY;
+				if (!(saved_style & TEX_FLAG_MATHF_DISPLAY))
+				{
+					p->style |= TEX_FLAG_SCRIPT;
+				}
+
+				NodeRef numerator = NODE_NULL;
+				NodeRef denominator = NODE_NULL;
 				if (ml_peek(&p->lx).kind == M_LBRACE)
-					num = parse_group(p);
+				{
+					numerator = parse_group(p);
+				}
 				else
-					num = parse_atom(p);
+				{
+					numerator = parse_atom(p);
+				}
+
+				p->style |= TEX_FLAG_CRAMPED;
 				if (ml_peek(&p->lx).kind == M_LBRACE)
-					den = parse_group(p);
+				{
+					denominator = parse_group(p);
+				}
 				else
-					den = parse_atom(p);
-				p->current_role = saved_role;
+				{
+					denominator = parse_atom(p);
+				}
+				p->style = saved_style;
 
 				ListBuilder lb;
 				lb_init(&lb);
-				lb_push(p, &lb, num);
-				lb_push(p, &lb, den);
+				lb_push(p, &lb, numerator);
+				lb_push(p, &lb, denominator);
 
 				NodeRef ref = new_node(p, N_MATRIX);
 				if (ref == NODE_NULL)
@@ -1379,38 +1080,32 @@ static NodeRef parse_command(Parser* p, const char* name, int len)
 			}
 			else if (d.code == SYMC_SQRT)
 			{
-				// index is script context
-				uint8_t saved_role = p->current_role;
-				p->current_role = 1; // FONTROLE_SCRIPT
+				uint8_t saved_style = p->style;
+				p->style = TEX_FLAG_SCRIPT;
 				NodeRef index = parse_optional_bracket_arg(p);
-				p->current_role = saved_role;
+				p->style = saved_style;
 				if (TEX_HAS_ERROR(p->L))
 					return NODE_NULL;
 
-				// radicand inherits current role
-				NodeRef rad = NODE_NULL;
-				MToken pk2 = ml_peek(&p->lx);
-				if (pk2.kind == M_LBRACE)
+				p->style |= TEX_FLAG_CRAMPED;
+				NodeRef radicand = NODE_NULL;
+				MToken next_token = ml_peek(&p->lx);
+				if (next_token.kind == M_LBRACE)
 				{
-					rad = parse_group(p);
-				}
-				else if (pk2.kind == M_EOF || pk2.kind == M_RBRACE)
-				{
-					TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Missing argument for \\sqrt", 0);
-					return NODE_NULL;
+					radicand = parse_group(p);
 				}
 				else
 				{
-					rad = parse_atom(p);
+					radicand = parse_atom(p);
 				}
-				if (TEX_HAS_ERROR(p->L))
-					return NODE_NULL;
+				p->style = saved_style;
 				NodeRef ref = new_node(p, N_SQRT);
 				if (ref == NODE_NULL)
 					return NODE_NULL;
-				Node* s = pool_get_node(p->pool, ref);
-				s->data.sqrt.rad = rad;
-				s->data.sqrt.index = index; // NODE_NULL if not provided
+
+				Node* radical = pool_get_node(p->pool, ref);
+				radical->data.sqrt.rad = radicand;
+				radical->data.sqrt.index = index; // NODE_NULL if not provided
 				return ref;
 			}
 			else if (d.code == SYMC_OVERBRACE || d.code == SYMC_UNDERBRACE)
@@ -1422,74 +1117,47 @@ static NodeRef parse_command(Parser* p, const char* name, int len)
 				else
 					content = parse_atom(p);
 
-				NodeRef ref = new_node(p, N_SPANDECO);
-				if (ref == NODE_NULL)
-					return NODE_NULL;
-				Node* n = pool_get_node(p->pool, ref);
-				n->data.spandeco.content = content;
-				n->data.spandeco.label = NODE_NULL;
-				n->data.spandeco.deco_type = (d.code == SYMC_OVERBRACE) ? DECO_OVERBRACE : DECO_UNDERBRACE;
+				NodeRef label = NODE_NULL;
 
 				// ^ for overbrace, _ for underbrace, label is script context
 				MToken k = ml_peek(&p->lx);
 				if ((d.code == SYMC_OVERBRACE && k.kind == M_CARET) || (d.code == SYMC_UNDERBRACE && k.kind == M_UNDER))
 				{
 					(void)ml_next(&p->lx);
-					uint8_t saved_role = p->current_role;
-					p->current_role = 1; // FONTROLE_SCRIPT
-					n->data.spandeco.label = parse_script_arg(p);
-					p->current_role = saved_role;
+					uint8_t saved_style = p->style;
+					p->style = (saved_style & ~TEX_FLAG_MATHF_DISPLAY) | TEX_FLAG_SCRIPT;
+					if (d.code == SYMC_UNDERBRACE)
+					{
+						p->style |= TEX_FLAG_CRAMPED;
+					}
+					label = parse_atom_noscript(p);
+					p->style = saved_style;
 				}
+
+				NodeRef ref = new_node(p, N_SPANDECO);
+				if (ref == NODE_NULL)
+					return NODE_NULL;
+				Node* n = pool_get_node(p->pool, ref);
+				n->data.spandeco.content = content;
+				n->data.spandeco.label = label;
+				n->data.spandeco.deco_type = (d.code == SYMC_OVERBRACE) ? DECO_OVERBRACE : DECO_UNDERBRACE;
 				return ref;
 			}
 			break;
 		}
 	case SYM_FUNC:
 		{
-			// functions render as upright text, lim is special with under-limit
+			NodeRef ref = make_text(p, g_func_text[d.code].str, (size_t)g_func_text[d.code].len);
+			if (ref == NODE_NULL)
+				return NODE_NULL;
+
+			Node* n = pool_get_node(p->pool, ref);
+			n->flags |= TEX_FLAG_OPERATOR;
 			if (d.code == SYMC_FUNC_LIM)
 			{
-				NodeRef ref = new_node(p, N_FUNC_LIM);
-				if (ref == NODE_NULL)
-					return NODE_NULL;
-				Node* lim = pool_get_node(p->pool, ref);
-				// optional under-limit
-				MToken pk = ml_peek(&p->lx);
-				if (pk.kind == M_UNDER)
-				{
-					(void)ml_next(&p->lx);
-					uint8_t saved_role = p->current_role;
-					p->current_role = 1; // FONTROLE_SCRIPT
-					NodeRef arg = parse_script_arg(p);
-					p->current_role = saved_role;
-					lim->data.func_lim.limit = arg;
-				}
-				return ref;
+				n->flags |= TEX_FLAG_LIMITS;
 			}
-
-			if (d.code > 0 && d.code < func_names_count)
-			{
-				TEX_ASSERT(g_func_text[d.code].str != NULL && "Missing string mapping for SYM_FUNC");
-
-				if (g_func_text[d.code].str)
-				{
-					NodeRef ref = new_node(p, N_TEXT);
-					if (ref == NODE_NULL)
-						return NODE_NULL;
-					Node* n = pool_get_node(p->pool, ref);
-					// for function names, allocate in pool
-					StringId sid = pool_alloc_string(p->pool, g_func_text[d.code].str, (size_t)g_func_text[d.code].len);
-					if (sid == STRING_NULL)
-					{
-						TEX_SET_ERROR(p->L, TEX_ERR_OOM, "OOM allocating function name", 0);
-						return NODE_NULL;
-					}
-					n->data.text.sid = sid;
-					n->data.text.len = (uint16_t)g_func_text[d.code].len;
-					return ref;
-				}
-			}
-			break;
+			return ref;
 		}
 	case SYM_MULTIOP:
 		{
@@ -1537,8 +1205,12 @@ static NodeRef parse_command(Parser* p, const char* name, int len)
 	return make_text(p, name, (size_t)len);
 }
 
+// Callers handle list terminators. A required atom either exists or sets L's error.
 static NodeRef parse_atom(Parser* p)
 {
+	if (TEX_HAS_ERROR(p->L))
+		return NODE_NULL;
+
 	MToken t = ml_peek(&p->lx);
 	if (t.kind == M_LBRACE)
 	{
@@ -1567,16 +1239,9 @@ static NodeRef parse_atom(Parser* p)
 		NodeRef n = make_glyph(p, (t.kind == M_CARET) ? '^' : '_');
 		return n;
 	}
-	if (t.kind == M_RBRACE)
-	{
-		// caller handles '}'
-		return NODE_NULL;
-	}
-	if (t.kind == M_EOF)
-		return NODE_NULL;
 
 	(void)ml_next(&p->lx);
-	TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Unexpected token in math expression", 0);
+	TEX_SET_ERROR(p->L, TEX_ERR_PARSE, "Expected math atom", 0);
 	return NODE_NULL;
 }
 
@@ -1585,104 +1250,34 @@ static ListId parse_list_core(Parser* p, int stop_on_right)
 	ListBuilder lb;
 	lb_init(&lb);
 
-	// pending run of contiguous ASCII characters
-	const char* run_start = NULL;
-	int run_len = 0;
-
-	while (1)
+	while (!TEX_HAS_ERROR(p->L))
 	{
 		MToken pk = ml_peek(&p->lx);
 		if (pk.kind == M_EOF || pk.kind == M_RBRACE)
 			break;
-		// Stop when we encounter \right (if stop_on_right is set)
 		if (stop_on_right && pk.kind == M_CMD && pk.len == 5 && strncmp(pk.start, "right", 5) == 0)
 			break;
-		if (TEX_HAS_ERROR(p->L))
-			break;
 
-		if (pk.kind == M_CHAR)
-		{
-			// accumulate character into pending run
-			if (run_len == 0)
-			{
-				run_start = pk.start;
-				run_len = 1;
-			}
-			else if (pk.start == run_start + run_len)
-			{
-				// contiguous in source buffer
-				run_len++;
-			}
-			else
-			{
-				// noncontiguous: flush current run, start new one
-				flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-				run_start = pk.start;
-				run_len = 1;
-			}
-			ml_next(&p->lx); // consume the character token
-
-			// check if a script marker follows this character
-			MToken next = ml_peek(&p->lx);
-			if (is_script_marker(next.kind))
-			{
-				// script follows: flush run with last char as script base
-				NodeRef base = NODE_NULL;
-				flush_char_run(p, run_start, run_len, 1, &lb, &base);
-				run_start = NULL;
-				run_len = 0;
-
-				// attach scripts to the base glyph
-				if (base != NODE_NULL)
-				{
-					base = attach_scripts(p, base);
-					lb_push(p, &lb, base);
-				}
-			}
-			// else: continue accumulating
-		}
-		else if (is_script_marker(pk.kind))
-		{
-			// script marker without preceding character (standalone ^ or _)
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
-
-			ml_next(&p->lx);
-			NodeRef n = make_glyph(p, (pk.kind == M_CARET) ? '^' : '_');
-			lb_push(p, &lb, n);
-		}
-		else
-		{
-			// other token
-			flush_char_run(p, run_start, run_len, 0, &lb, NULL);
-			run_start = NULL;
-			run_len = 0;
-
-			NodeRef n = parse_atom(p);
-			if (TEX_HAS_ERROR(p->L) || n == NODE_NULL)
-				break;
-			lb_push(p, &lb, n);
-		}
+		NodeRef item = parse_atom(p);
+		lb_push(p, &lb, item);
 	}
-
-	// flush any remaining accumulated characters
-	flush_char_run(p, run_start, run_len, 0, &lb, NULL);
 
 	return lb.head;
 }
 
-static ListId parse_math_list(Parser* p) { return parse_list_core(p, 0); }
-
-NodeRef tex_parse_math(const char* input, int len, UnifiedPool* pool, TeX_Layout* layout)
+static ListId parse_math_list(Parser* p)
 {
-	if (!pool)
+	return parse_list_core(p, 0);
+}
+
+NodeRef tex_parse_math(const char* input, int len, UnifiedPool* pool, TeX_Layout* layout, bool display)
+{
+	if (!layout)
 		return NODE_NULL;
 
-	if (!input)
+	if (!pool || !input)
 	{
-		if (layout)
-			TEX_SET_ERROR(layout, TEX_ERR_INPUT, "NULL input to math parser", 0);
+		TEX_SET_ERROR(layout, TEX_ERR_INPUT, "Math parser requires input and pool", 0);
 		return NODE_NULL;
 	}
 	if (len < 0)
@@ -1693,11 +1288,16 @@ NodeRef tex_parse_math(const char* input, int len, UnifiedPool* pool, TeX_Layout
 	p.depth = 0;
 	p.pool = pool;
 	p.L = layout;
-	p.current_role = 0; // FONTROLE_MAIN
+	p.style = display ? TEX_FLAG_MATHF_DISPLAY : 0;
 
 	ListId seq = parse_math_list(&p);
 	if (TEX_HAS_ERROR(layout))
 	{
+		return NODE_NULL;
+	}
+	if (ml_peek(&p.lx).kind != M_EOF)
+	{
+		TEX_SET_ERROR(layout, TEX_ERR_PARSE, "Unexpected math list terminator", 0);
 		return NODE_NULL;
 	}
 

@@ -1,4 +1,4 @@
-#include <assert.h>
+#include "test_check.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -14,16 +14,17 @@ static void check_sym(const char* name, SymbolKind kind, int code)
 	if (!(ok && d.kind == kind))
 	{
 		fprintf(stderr, "lookup failed: %s (ok=%d kind=%d)\n", name, ok, d.kind);
-		assert(0);
+		CHECK(0);
 	}
+
 	if (kind == SYM_GLYPH)
 	{
-		int expect_u = (unsigned char)code;
-		if ((int)d.code != expect_u)
+		int expected_code = (unsigned char)code;
+		if ((int)d.code != expected_code)
 		{
-			fprintf(stderr, "code mismatch: %s -> got=%d expect=%d\n", name, (int)d.code, expect_u);
+			fprintf(stderr, "code mismatch: %s -> got=%d expect=%d\n", name, (int)d.code, expected_code);
 		}
-		assert((int)d.code == expect_u);
+		CHECK((int)d.code == expected_code);
 	}
 }
 
@@ -47,37 +48,38 @@ int main(void)
 	// Structural
 	SymbolDesc d;
 	memset(&d, 0, sizeof(d));
-	assert(texsym_find("frac", 4, &d) && d.kind == SYM_STRUCT);
-	assert(texsym_find("sqrt", 4, &d) && d.kind == SYM_STRUCT);
+	CHECK(texsym_find("frac", 4, &d) && d.kind == SYM_STRUCT);
+	CHECK(texsym_find("sqrt", 4, &d) && d.kind == SYM_STRUCT);
 
 	// Functions
-	assert(texsym_find("sin", 3, &d) && d.kind == SYM_FUNC);
-	assert(texsym_find("cos", 3, &d) && d.kind == SYM_FUNC);
-	assert(texsym_find("tan", 3, &d) && d.kind == SYM_FUNC);
-	assert(texsym_find("ln", 2, &d) && d.kind == SYM_FUNC);
-	assert(texsym_find("lim", 3, &d) && d.kind == SYM_FUNC);
+	CHECK(texsym_find("sin", 3, &d) && d.kind == SYM_FUNC);
+	CHECK(texsym_find("cos", 3, &d) && d.kind == SYM_FUNC);
+	CHECK(texsym_find("tan", 3, &d) && d.kind == SYM_FUNC);
+	CHECK(texsym_find("ln", 2, &d) && d.kind == SYM_FUNC);
+	CHECK(texsym_find("lim", 3, &d) && d.kind == SYM_FUNC);
 
 	// Accents
-	assert(texsym_find("vec", 3, &d) && d.kind == SYM_ACCENT);
-	assert(texsym_find("hat", 3, &d) && d.kind == SYM_ACCENT);
-	assert(texsym_find("bar", 3, &d) && d.kind == SYM_ACCENT);
-	assert(texsym_find("dot", 3, &d) && d.kind == SYM_ACCENT);
+	CHECK(texsym_find("vec", 3, &d) && d.kind == SYM_ACCENT);
+	CHECK(texsym_find("hat", 3, &d) && d.kind == SYM_ACCENT);
+	CHECK(texsym_find("bar", 3, &d) && d.kind == SYM_ACCENT);
+	CHECK(texsym_find("dot", 3, &d) && d.kind == SYM_ACCENT);
 
 	// Spaces
-	assert(texsym_find(",", 1, &d) && d.kind == SYM_SPACE); // thin space
-	assert(texsym_find(":", 1, &d) && d.kind == SYM_SPACE); // med space
-	assert(texsym_find(";", 1, &d) && d.kind == SYM_SPACE); // thick space
-	assert(texsym_find("!", 1, &d) && d.kind == SYM_SPACE); // negative thin
-	assert(texsym_find("quad", (int)strlen("quad"), &d) && d.kind == SYM_SPACE); // em space
+	CHECK(texsym_find(",", 1, &d) && d.kind == SYM_SPACE); // thin space
+	CHECK(texsym_find(":", 1, &d) && d.kind == SYM_SPACE); // med space
+	CHECK(texsym_find(";", 1, &d) && d.kind == SYM_SPACE); // thick space
+	CHECK(texsym_find("!", 1, &d) && d.kind == SYM_SPACE); // negative thin
+	CHECK(texsym_find("quad", (int)strlen("quad"), &d) && d.kind == SYM_SPACE); // em space
+
 	int ok_qquad = texsym_find("qquad", (int)strlen("qquad"), &d);
 	if (!(ok_qquad && d.kind == SYM_SPACE))
 	{
 		fprintf(stderr, "qquad lookup: ok=%d kind=%d\n", ok_qquad, d.kind);
 	}
-	assert(ok_qquad && d.kind == SYM_SPACE); // 2em space
+	CHECK(ok_qquad && d.kind == SYM_SPACE); // 2em space
 
 	// Unknown
-	assert(!texsym_find("does_not_exist", 14, &d));
+	CHECK(!texsym_find("does_not_exist", 14, &d));
 
 	printf("test_symbols: PASS\n");
 	return 0;

@@ -17,7 +17,6 @@ libtexce is written in C, targets the ez80 via the [CE C/C++ Toolchain](https://
 The full rendering pipeline is five steps: load fonts, configure, format, create a renderer, draw.
 
 ```c
-#include <fontlibc.h>
 #include <graphx.h>
 #include <keypadc.h>
 #include <tice.h>
@@ -30,25 +29,20 @@ int main(void)
     gfx_SetDrawBuffer();
     gfx_SetTransparentColor(255);
 
-    fontlib_font_t* font_main   = fontlib_GetFontByIndex("TeXFonts", 0);
-    fontlib_font_t* font_script = fontlib_GetFontByIndex("TeXScrpt", 0);
-    if (!font_main || !font_script) {
+    TeX_Font font_main;
+    TeX_Font font_script;
+    if (!tex_font_open(&font_main, "TeXFonts") ||
+        !tex_font_open(&font_script, "TeXScrpt"))
+    {
         gfx_PrintStringXY("Missing font packs!", 10, 10);
         gfx_SwapDraw();
-        while (!os_GetCSC());
+
+        while (!os_GetCSC()) {}
         gfx_End();
         return 1;
     }
 
-    // set fonts (global state, call once)
-    tex_draw_set_fonts(font_main, font_script);
-    fontlib_SetTransparency(true);
-    fontlib_SetForegroundColor(0);
-    fontlib_SetBackgroundColor(255);
-
-    // prepare a mutable input buffer.
-    // tex_format() tokenizes in place, the buffer must be writable
-    // and must remain allocated as long as the layout exists
+    // Source is borrowed read-only and must outlive the layout.
     const char* source =
         "Quadratic Formula\n"
         "$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$\n"
@@ -56,18 +50,16 @@ int main(void)
         "Taylor Series\n"
         "$$f(x) \\approx f(a) + f'(a)(x-a) + \\frac{f''(a)}{2}(x-a)^2$$";
 
-    size_t len = strlen(source);
-    char* buf = malloc(len + 1);
-    memcpy(buf, source, len + 1);
-
     // format parses the document and computes layout metrics
     TeX_Config cfg = {
-        .color_fg  = 0,       // black
-        .color_bg  = 255,     // white
-        .font_pack = "TeXFonts",
+        .palette = { 255, 254, 253, 0 }, // background, two reserved shades, ink
+        .justify = true, // optional: fill automatically wrapped text lines
+        .font_main = font_main,
+        .font_script = font_script,
     };
+
     int margin = 10;
-    TeX_Layout* layout = tex_format(buf, GFX_LCD_WIDTH - margin * 2, &cfg);
+    TeX_Layout* layout = tex_format(source, GFX_LCD_WIDTH - margin * 2, &cfg);
 
     // create a renderer (manages a transient memory pool for drawing)
     TeX_Renderer* renderer = tex_renderer_create();
@@ -90,10 +82,9 @@ int main(void)
         gfx_SwapDraw();
     }
 
-    // cleanup order matters: renderer, layout, then buffer
+    // Renderer and layout may be destroyed in either order.
     tex_renderer_destroy(renderer);
     tex_free(layout);
-    free(buf);
     gfx_End();
     return 0;
 }
@@ -117,7 +108,7 @@ The public API is declared in [`tex/tex.h`](src/tex/tex.h). All functions use C 
 
 | Function | Description |
 |---|---|
-| `TeX_Layout* tex_format(char* input, int width, TeX_Config* config)` | Parse a mixed text/math document and compute layout metrics. Returns `NULL` only on catastrophic failure (OOM during initialization). Check `tex_get_last_error()` for parse errors |
+| `TeX_Layout* tex_format(const char* input, int width, const TeX_Config* config)` | Measure a mixed text/math document without modifying its source. Returns `NULL` for invalid arguments or initialization OOM. Check `tex_get_last_error()` on the returned layout. |
 | `int tex_get_total_height(TeX_Layout* layout)` | Total rendered height in pixels. Use for scroll bounds. |
 | `void tex_free(TeX_Layout* layout)` | Free all resources associated with a layout |
 
@@ -129,7 +120,6 @@ The public API is declared in [`tex/tex.h`](src/tex/tex.h). All functions use C 
 | `TeX_Renderer* tex_renderer_create_sized(size_t slab_size)` | Create a renderer with a custom slab size |
 | `void tex_renderer_destroy(TeX_Renderer* r)` | Destroy the renderer and free its slab. |
 | `void tex_draw(TeX_Renderer* r, TeX_Layout* layout, int x, int y, int scroll_y)` | Draw visible portion of the document to the current draw buffer |
-| `void tex_draw_set_fonts(fontlib_font_t* main, fontlib_font_t* script)` | Set the font handles used for rendering. **Global state**, call once after loading fonts |
 
 ### Error Handling
 
@@ -148,16 +138,24 @@ The public API is declared in [`tex/tex.h`](src/tex/tex.h). All functions use C 
 ## Configuration
 
 ```c
-typedef struct {
-    uint8_t      color_fg;        // Foreground color (palette index, 0-255)
-    uint8_t      color_bg;        // Background color (palette index, 0-255)
-    const char*  font_pack;       // Font pack name (default: "TeXFonts")
+typedef struct
+{
+    uint8_t palette[4];           // Background, 1/3 ink, 2/3 ink, foreground
+    bool justify;                // Expand word spaces on automatic wraps (default false)
+
+    TeX_Font font_main;           // Borrowed validated main-font view
+    TeX_Font font_script;         // Borrowed validated script-font view
+
     TeX_ErrorLogFn error_callback; // Optional error/warning callback
-    void*        error_userdata;   // Passed to callback
+    void* error_userdata;         // Passed to callback
 } TeX_Config;
 ```
 
-Colors are 8 bit palette indices matching the graphx palette. The error callback receives a severity level (0 = info, 1 = warning, 2 = error), a message string, and in debug builds, the source file and line number where the error occurred.
+Colors are 8 bit palette indices matching the graphx palette. Use four distinct indices: the renderer uses them to distinguish background, partial coverage and full ink when strokes overlap. `tex_draw()` sets the two intermediate colors from your background and foreground. Clear to `palette[0]` before drawing, and don't change the intermediate colors while text using them remains visible.
+
+Set `justify = true` to fill automatically wrapped text lines. Paragraph endings and explicit newlines are not stretched.
+
+The error callback receives a severity level (0 = info, 1 = warning, 2 = error), a message string, and in debug builds, the source file and line number where the error occurred.
 
 ## Ownership and Lifetime Rules
 
@@ -165,33 +163,24 @@ Understanding buffer ownership is critical for correct usage.
 
 ### The Input Buffer
 
-`tex_format()` **tokenizes the input buffer in place**. After the call, the buffer's contents are modified (null terminators are inserted between tokens). You should consider the buffer opaque after passing it to `tex_format()`. do NOT attempt to read, modify, or reason about its contents
+`tex_format()` reads the input without modifying it, so string literals are valid inputs.
 
-**the buffer must remain allocated and at the same address** for the entire lifetime of the `TeX_Layout`. This is because `tex_draw()` reparses the source text from the buffer on every frame (see [How Rendering Works](#how-rendering-works) below). The layout stores a pointer to the buffer and not a copy
+**The source and font bytes must remain unchanged and at the same address** for the entire lifetime of the `TeX_Layout`. The layout borrows them rather than making copies, and `tex_draw()` reparses the source on cache misses.
 
-**Cleanup order matters:**
-```c
-// correct: free in reverse order of creation
-tex_renderer_destroy(renderer);
-tex_free(layout);
-free(buf);
-
-// wrong: freeing buffer while layout still exists
-free(buf);           // dangling pointer in layout->source
-tex_free(layout);    // undefined behavior
-```
+Free the layout before releasing its source or font storage. The renderer can be destroyed before or after the layout.
 
 ### The Renderer
 
-A `TeX_Renderer` owns a slab of memory used as a transient pool. Each call to `tex_draw()` may reset and reuse this pool. A single renderer can be shared across multiple layouts. it has no permanent binding to any particular layout.
+A `TeX_Renderer` owns a slab of memory used as a transient pool. Each call to `tex_draw()` may reset and reuse this pool. A single renderer can be shared across multiple layouts.
 
 ### Summary
 
 | Object | Owns | Must outlive |
 |---|---|---|
-| Input buffer (your `malloc`) | The raw text bytes | `TeX_Layout` |
-| `TeX_Layout` | Checkpoint index, config copy, error state | Nothing (leaf) |
-| `TeX_Renderer` | Transient slab pool | Nothing (leaf) |
+| Source text | The caller's immutable bytes | `TeX_Layout` |
+| Font data | The caller's validated, stationary font bytes | `TeX_Layout` |
+| `TeX_Layout` | Checkpoint index, config/font context, error state | Neither renderer nor source storage |
+| `TeX_Renderer` | Transient slab pool and line array | Neither layout nor source storage |
 
 ## How Rendering Works
 
@@ -207,52 +196,44 @@ Checkpoints record `(y_position, source_pointer)` pairs at regular pixel interva
 
 Each time `tex_draw()` is called, the renderer:
 
-1. Checks its cache. If the scroll position falls within the previously hydrated window, the existing render tree is reused without reparsing
-2. Otherwise, rehydrates. the renderer finds the nearest checkpoint before `scroll_y - padding`, reparses from that point forward, and builds a render tree covering `scroll_y +- 240px` (one screen of padding in each direction)
+1. Checks its cache. If the visible region falls within the previously hydrated window, the existing render tree is reused without reparsing
+2. Otherwise, rehydrates. The renderer finds the nearest checkpoint before `scroll_y - padding`, reparses from that point forward, and builds a render tree covering the viewport plus 240px of padding in each direction
 3. Draws the visible lines from the render tree to the current graphx draw buffer
 
 This means the renderer only ever holds nodes for ~3 screens of content, regardless of total document length. the tradeoff is that scrolling to a completely new region triggers a reparse, but checkpoint indexing keeps this fast
 
 ### Why This Matters to You
 
-- **Documents can be arbitrarily long** without proportional memory cost.
+- **Render tree storage does not grow with document length** the existing document height limit is 20000 pixels.
 - **The input buffer must stay alive** because `tex_draw()` reads from it on every cache miss.
 - **Renderer slab sizing** (`tex_renderer_create_sized()`) controls the upper bound on how much visible content can be rendered. The default 40 KB is too generous for most documents and you should consider using the sized init function. Use `tex_renderer_get_stats()` to measure actual usage.
 
 ## Font System and Assets
 
-libtexce uses two custom font packs stored as appvars:
+libtexce uses two Latin Modern fonts stored as AppVars:
 
-| AppVar | Description | Glyph Height |
+| AppVar | Description | Nominal Size |
 |---|---|---|
 | `TeXFonts.8xv` | Main text and math font | 16 px |
-| `TeXScrpt.8xv` | Script/subscript/superscript font | 12 px |
+| `TeXScrpt.8xv` | Script/subscript/superscript font | 11 px |
 
-Both must be transferred to the calculator before running any program that uses libtexce. prebuilt copies are in the [`assets/`](assets/) directory. these do not look great. Contributions are welcome
+Both must be transferred to the calculator before running any program that uses libtexce. Prebuilt copies are in the [`assets/`](assets/) directory. Keep them archived to read the font data directly from flash without a font-sized RAM allocation.
 
 ### What is in the Fonts
 
-Each font pack provides the full ASCII range (0x20–0x7F) plus custom math symbols:
+Each font provides ASCII text, Greek letters, calculus symbols, operators, arrows and delimiters, plus italic Latin letters and larger display operators.
 
-- **0x01–0x10**: Set theory symbols (∪, ∩, ∉, ∅, ∀, ∃, ⊆, ≡, ∼, ≅, ∝, ⊥, ∥, ∠, ∘, ⊕)
-- **0x80–0x99**: Greek letters (α–ω, Γ, Δ, Θ, Λ, Ξ, Π, Σ, Φ, Ψ, Ω)
-- **0x9A–0xA0**: Calculus (∂, ∞, ∇, ′, ℓ, ℏ, °)
-- **0xA1–0xA3**: Big operators (∫, Σ, Π)
-- **0xA4–0xBC**: Operators, arrows, logic, delimiters, structural glyphs
-
-The header [`include/texfont.h`](include/texfont.h) defines named constants for all custom glyphs (e.g. `TEXFONT_alpha`, `TEXFONT_INTEGRAL_CHAR`), though you generally won' need these. the LaTeX parser maps `\alpha`, `\int`, etc. automatically
+The header [`include/texfont.h`](include/texfont.h) defines named constants for custom glyphs, though you generally won't need these. The LaTeX parser maps `\alpha`, `\int`, etc. automatically.
 
 ### Rebuilding Fonts
 
-If you need to modify the fonts, the pipeline is:
+Install Pillow and fontTools on the build host, then run:
 
-1. Edit the source bitmap images in `tools/` (pixel grids with a red baseline guide)
-2. Run `python tools/process_fonts.py export` to generate convfont compatible `.txt` descriptors
-3. Run `python tools/process_fonts.py build` to produce the `.8xv` AppVars (requires `convfont` and `convbin` in `PATH`)
+```bash
+python3 tools/process_fonts.py
+```
 
-Or in one step: `python tools/process_fonts.py all`
-
-Aseprite is recommended.
+The generator reads the Latin Modern fonts in `tools/fonts/` and writes both `.8xv` files to `assets/`. Use `--outdir PATH` to write elsewhere. The fonts use the included GUST Font License.
 
 ## Supported LaTeX
 
@@ -269,7 +250,7 @@ Highlights:
 - **Accents**: `\hat`, `\bar`, `\vec`, `\dot`, `\tilde`, `\overline`, `\underline`
 - **Decorations**: `\overbrace{...}^{label}`, `\underbrace{...}_{label}`
 - **Delimiters**: `\left( ... \right)` with auto-sizing for `()`, `[]`, `\{\}`, `||`, `\langle\rangle`, `\lfloor\rfloor`, `\lceil\rceil`
-- **Matrices**: `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `matrix`, `array` (with column separators via `|`)
+- **Matrices**: `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `matrix`, `array` (with column separators via `|`). Leading, interior, and trailing empty cells retain their column positions.
 - **Spacing**: `\,`, `\:`, `\;`, `\!`, `\quad`, `\qquad`
 - **Text mode**: `\text{...}` for roman text within math
 
@@ -291,12 +272,9 @@ A single `TeX_Renderer` can draw different layouts on different frames. This is 
 ```c
 TeX_Renderer* renderer = tex_renderer_create();
 
-// each message gets its own layout and buffer
-char* buf1 = strdup("What is $E = mc^2$?");
-TeX_Layout* msg1 = tex_format(buf1, width, &cfg);
-
-char* buf2 = strdup("Einstein's mass-energy equivalence:\n$$E = mc^2$$");
-TeX_Layout* msg2 = tex_format(buf2, width, &cfg);
+// String literals already have sufficient lifetime; no source copies needed.
+TeX_Layout* msg1 = tex_format("What is $E = mc^2$?", width, &cfg);
+TeX_Layout* msg2 = tex_format("Einstein's mass-energy equivalence:\n$$E = mc^2$$", width, &cfg);
 
 // draw them at different positions using the same renderer
 // note: scroll_y=0 since we position each message manually via the y parameter
@@ -306,7 +284,6 @@ tex_draw(renderer, msg2, x, y2, 0);
 // cleanup
 tex_renderer_destroy(renderer);
 tex_free(msg1); tex_free(msg2);
-free(buf1); free(buf2);
 ```
 
 > **Note:** When switching between layouts, the renderer invalidates its cache and reparses. For a scrolling view of a single layout, the cache avoids redundant work
@@ -342,9 +319,9 @@ void my_error_handler(void* userdata, int level, const char* msg,
 }
 
 TeX_Config cfg = {
-    .color_fg = 0,
-    .color_bg = 255,
-    .font_pack = "TeXFonts",
+    .palette = {255, 254, 253, 0},
+    .font_main = font_main,
+    .font_script = font_script,
     .error_callback = my_error_handler,
     .error_userdata = NULL,
 };
@@ -370,7 +347,7 @@ libtexce uses CMake with presets. There are two independent build systems: the n
 
 | Target | Requirements |
 |---|---|
-| Native | Clang, CMake >= 3.20, Ninja, SDL2, SDL2_mixer |
+| Native | Clang with C23 support, CMake >= 3.21, Ninja, SDL2, SDL2_mixer |
 | CE | [CE C/C++ Toolchain](https://ce-programming.github.io/toolchain/) (provides `ez80-clang`, `fasmg`, `convbin`) |
 | WASM | Emscripten SDK, CMake, Ninja |
 
@@ -434,9 +411,10 @@ Located in [`tests/`](tests/), these test individual pipeline stages against the
 | Test | What it covers |
 |---|---|
 | `test_token` | Tokenizer (text, math delimiters, escaping) |
-| `test_parse` | Parser (fractions, scripts, overlays, matrices, delimiters) |
+| `test_parse` | Parser, required operands, balanced groups, and positional empty matrix cells |
 | `test_measure` | Measurement pass (node dimensions) |
-| `test_layout` | Full dry-run layout (total height, line breaking) |
+| `test_layout` | Checkpoint replay, cache lifetime, font switching, antialiasing, palette ownership, clipping, delimiter clearance, text ink bounds, and justification |
+| `test_fonts` | Borrowed font/glyph views and malformed payload bounds |
 | `test_symbols` | Symbol table lookup |
 | `test_pool` | Pool allocator (nodes, strings, lists, OOM) |
 
@@ -479,10 +457,10 @@ Copy (or git submodule) the `src/tex/` directory and `include/texfont.h` into yo
 ```
 src/tex/tex_util.c      src/tex/tex_pool.c
 src/tex/tex_symbols.c   src/tex/tex_metrics.c
-src/tex/tex_fonts.c     src/tex/tex_token.c
-src/tex/tex_parse.c     src/tex/tex_measure.c
-src/tex/tex_layout.c    src/tex/tex_renderer.c
-src/tex/tex_draw.c
+src/tex/tex_fonts.c
+src/tex/tex_token.c     src/tex/tex_parse.c
+src/tex/tex_measure.c   src/tex/tex_layout.c
+src/tex/tex_renderer.c  src/tex/tex_draw.c
 ```
 
 ### 2. Include Paths
@@ -494,8 +472,8 @@ Your build must be able to find:
 ### 3. Required Assets
 
 Transfer these to the calculator alongside your `.8xp`:
-- `TeXFonts.8xv` and `TeXScrpt.8xv` (from `assets/`)
-- `clibs.8xg` (standard CE C libraries)
+- `TeXFonts.8xv` and `TeXScrpt.8xv` (from `assets/`; keep archived for minimal RAM use)
+- `clibs.8xg` matching your CE toolchain's library versions (the bundled copy may be older than a current toolchain)
 
 ### 4. CMake Integration (Recommended)
 
@@ -522,3 +500,5 @@ libtexce is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0-
 
 See [`LICENSE`](LICENSE) for the full text.
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for SPDX header guidance on new files.
+
+The Latin Modern source fonts and renamed derived AppVars use the [GUST Font License](tools/fonts/GUST-FONT-LICENSE.txt), with its incorporated [LPPL](tools/fonts/LPPL-1.3c.txt).

@@ -7,6 +7,8 @@
 
 static int g_fail = 0;
 static TeX_Renderer* g_renderer = NULL;
+static TeX_Font g_font_main;
+static TeX_Font g_font_script;
 
 static void expect(int cond, const char* msg)
 {
@@ -39,7 +41,11 @@ static void test_error_cb(void* ud, int level, const char* msg, const char* file
 static void test_invalid_inputs(void)
 {
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	expect(tex_format(NULL, 80, &cfg) == NULL, "NULL input returns NULL layout");
 	char s[] = "x";
@@ -50,7 +56,11 @@ static void test_invalid_inputs(void)
 static void test_malformed_math_draws(void)
 {
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	// Unbalanced braces inside math; should not crash
 	char buf1[] = "$\\frac{a}{b$ trailing";
@@ -65,7 +75,11 @@ static void test_malformed_math_draws(void)
 static void test_deep_recursion_guard(void)
 {
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	// Build nested groups beyond TEX_PARSE_MAX_DEPTH
 	enum
@@ -93,7 +107,11 @@ static void test_deep_recursion_guard(void)
 static void test_height_clamp(void)
 {
 	TeX_Config cfg = {
-		.color_fg = 1, .color_bg = 255, .font_pack = "TeXFonts", .error_callback = test_error_cb, .error_userdata = NULL
+		.palette = {255, 254, 253, 0},
+		.font_main = g_font_main,
+		.font_script = g_font_script,
+		.error_callback = test_error_cb,
+		.error_userdata = NULL
 	};
 	// Create many lines to exceed maximum total height
 	char buf[8192];
@@ -113,6 +131,12 @@ static void test_height_clamp(void)
 
 int main(void)
 {
+	if (!tex_font_open(&g_font_main, "TeXFonts") || !tex_font_open(&g_font_script, "TeXScrpt"))
+	{
+		fprintf(stderr, "Failed to load test fonts\n");
+		return 1;
+	}
+
 	g_renderer = tex_renderer_create();
 	if (!g_renderer)
 	{

@@ -13,10 +13,10 @@ typedef struct TeX_Layout TeX_Layout;
 typedef struct TeX_Renderer TeX_Renderer;
 
 
-// Parse input, calculate layout, return handle
-// Input string is modified during parsing
-// Returns NULL only on catastrophic failure; check tex_get_last_error() for errors
-TeX_Layout* tex_format(char* input, int width, TeX_Config* config);
+// Measure immutable input. The input and config's font handles must remain valid
+// and unchanged until tex_free(), the config struct itself is copied.
+// Returns NULL for invalid arguments or initialization OOM
+TeX_Layout* tex_format(const char* input, int width, const TeX_Config* config);
 
 // Total rendered height in pixels (for scrollbar sizing)
 int tex_get_total_height(TeX_Layout* layout);
@@ -50,10 +50,6 @@ const char* tex_get_error_message(TeX_Layout* layout);
 // Get error detail value (offset, depth, count, etc.)
 int tex_get_error_value(TeX_Layout* layout);
 
-
-struct fontlib_font_t;
-typedef struct fontlib_font_t fontlib_font_t;
-void tex_draw_set_fonts(fontlib_font_t* main, fontlib_font_t* script);
 
 #ifdef __cplusplus
 }

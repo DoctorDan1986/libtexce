@@ -22,8 +22,8 @@ set(TEX_CORE_SOURCES
   ${TEX_ROOT}/src/tex/tex_util.c
   ${TEX_ROOT}/src/tex/tex_pool.c
   ${TEX_ROOT}/src/tex/tex_symbols.c
-  ${TEX_ROOT}/src/tex/tex_metrics.c
   ${TEX_ROOT}/src/tex/tex_fonts.c
+  ${TEX_ROOT}/src/tex/tex_metrics.c
   ${TEX_ROOT}/src/tex/tex_token.c
   ${TEX_ROOT}/src/tex/tex_parse.c
   ${TEX_ROOT}/src/tex/tex_measure.c
@@ -39,7 +39,6 @@ set(TEX_INCLUDE_DIRS
 )
 
 set(TEX_COMPILE_DEFS
-  -DTEX_USE_FONTLIB
   -DTEX_DIRECT_RENDER
 )
 
@@ -64,7 +63,7 @@ cedev_add_program(
     ${TEX_INCLUDE_DIRS}
 
   LIBLOAD
-    graphx keypadc fontlibc
+    graphx keypadc fileioc
 
   ${_DEMO_LANG_ARG}
 
@@ -93,7 +92,7 @@ cedev_add_program(
     ${TEX_INCLUDE_DIRS}
 
   LIBLOAD
-    graphx keypadc fontlibc
+    graphx keypadc fileioc
 
   ${_DEMO_LANG_ARG}
 
