@@ -45,6 +45,9 @@ int main(void)
 	check_sym("langle", SYM_GLYPH, TEXFONT_LANGLE_CHAR);
 	check_sym("rangle", SYM_GLYPH, TEXFONT_RANGLE_CHAR);
 	check_sym("supset", SYM_GLYPH, TEXFONT_SUPSET_CHAR);
+	check_sym("uparrow", SYM_GLYPH, TEXFONT_ARROW_UP_CHAR);
+	check_sym("downarrow", SYM_GLYPH, TEXFONT_ARROW_DOWN_CHAR);
+	check_sym("odot", SYM_GLYPH, TEXFONT_O_DOT_CHAR);
 
 	// Structural
 	SymbolDesc d;

@@ -300,6 +300,9 @@ static void test_math_spacing(void)
 		{ "p\\Rightarrow q", 3, {0, 1, 1} },
 		{ "p\\Leftrightarrow q", 3, {0, 1, 1} },
 		{ "p\\supset q", 3, {0, 1, 1} },
+		{ "p\\uparrow q", 3, {0, 1, 1} },
+		{ "p\\downarrow q", 3, {0, 1, 1} },
+		{ "p\\odot q", 3, {0, 1, 1} },
 		{ "p\\top q", 3, {0, 0, 0} },
 		{ "p\\bot q", 3, {0, 0, 0} },
 		{ "p\\perp q", 3, {0, 1, 1} }
@@ -334,7 +337,7 @@ static void test_math_spacing(void)
 
 	pool_reset(&pool);
 	TeX_Layout layout = {0};
-	NodeRef ref = tex_parse_math("x_{p\\wedge q\\vee\\lnot r\\implies\\top\\iff\\bot\\supset s}", -1, &pool, &layout, false);
+	NodeRef ref = tex_parse_math("x_{p\\wedge q\\vee\\lnot r\\implies\\top\\iff\\bot\\supset s\\uparrow t\\downarrow u\\odot v}", -1, &pool, &layout, false);
 	CHECK(ref != NODE_NULL);
 	CHECK(tex_get_last_error(&layout) == TEX_OK);
 	tex_measure_range(&pool, 0, (NodeRef)pool.node_count);

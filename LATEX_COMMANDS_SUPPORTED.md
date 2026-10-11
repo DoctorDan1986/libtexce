@@ -93,6 +93,7 @@
 - \\cup
 - \\degree
 - \\delta
+- \\downarrow
 - \\div
 - \\ell
 - \\emptyset
@@ -132,6 +133,7 @@
 - \\neq
 - \\notin
 - \\nu
+- \\odot
 - \\omega
 - \\omicron
 - \\oplus
@@ -163,6 +165,7 @@
 - \\times
 - \\to
 - \\top
+- \\uparrow
 - \\upsilon
 - \\vee
 - \\wedge
