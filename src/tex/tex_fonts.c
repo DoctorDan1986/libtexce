@@ -30,7 +30,7 @@ static uint16_t tex_font_u16(const uint8_t* bytes)
 
 int16_t tex_font_metric(TeX_Font font, TexFontMetric metric)
 {
-	return (int16_t)tex_font_u16(font.data + 8u + 2u * (unsigned int)metric);
+	return (int16_t)tex_font_u16(font.data + 8u + 2u * (size_t)metric);
 }
 
 bool tex_font_init(TeX_Font* out, const void* data, size_t size)
@@ -84,7 +84,7 @@ bool tex_font_init(TeX_Font* out, const void* data, size_t size)
 	size_t bitmap_cursor = TEX_FONT_BITMAP_START;
 	for (unsigned int code = 0; code < TEX_FONT_GLYPH_COUNT; ++code)
 	{
-		const uint8_t* glyph_record = bytes + TEX_FONT_HEADER_SIZE + code * TEX_FONT_RECORD_SIZE;
+		const uint8_t* glyph_record = bytes + TEX_FONT_HEADER_SIZE + (size_t)code * TEX_FONT_RECORD_SIZE;
 		size_t offset = tex_font_u16(glyph_record);
 		uint8_t width = glyph_record[TEX_FONT_RECORD_WIDTH];
 		uint8_t height = glyph_record[TEX_FONT_RECORD_HEIGHT];
@@ -182,7 +182,7 @@ bool tex_font_glyph(TeX_Font font, uint16_t code, TexGlyph* out)
 {
 	*out = (TexGlyph){ 0 };
 
-	const uint8_t* glyph_record = font.data + TEX_FONT_HEADER_SIZE + code * TEX_FONT_RECORD_SIZE;
+	const uint8_t* glyph_record = font.data + TEX_FONT_HEADER_SIZE + (size_t)code * TEX_FONT_RECORD_SIZE;
 
 	if (!glyph_record[TEX_FONT_RECORD_ADVANCE])
 		return false;

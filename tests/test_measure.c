@@ -130,10 +130,10 @@ static void test_sqrt_metrics(void)
 	CHECK(sq && "sqrt node should still be valid");
 	expect(sq->w > (rad ? rad->w : 0), "sqrt width > radicand width");
 	Node* index = pool_get_node(&pool, sq->data.sqrt.index);
+	CHECK(rad && index && "indexed tall radical has both children");
 
 	TexSqrtGeometry geometry;
 	tex_measure_sqrt_geometry(&pool, sq, &geometry);
-	expect(rad && index, "indexed tall radical has both children");
 	expect(geometry.bar_y + geometry.rule < -rad->asc, "overbar clears radicand ink");
 	expect(geometry.bottom_y + 1 >= rad->desc, "radical encloses the radicand depth");
 	expect(geometry.asc >= index->asc - geometry.index_y, "radical bounds include its degree");

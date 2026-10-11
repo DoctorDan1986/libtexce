@@ -142,7 +142,7 @@ Node* tex_math_next(UnifiedPool* pool, TexMathCursor* cursor, int* x)
 			{-3,-3, 0,-3,-3,-3,-3,-3 },
 			{-3, 3,-4,-5,-3, 0,-3,-3 }
 		};
-		int mu = spacing[previous][current];
+		int mu = (int)spacing[previous][current];
 		if (mu < 0)
 			mu = cursor->script ? 0 : -mu;
 		cursor->position_mu += mu * cursor->em;

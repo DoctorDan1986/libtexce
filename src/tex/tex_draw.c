@@ -46,7 +46,7 @@ static void blend_pixel(uint8_t* pixel, unsigned int level)
 static void rec_pixel(int x, int y, unsigned int level)
 {
 	if (x >= g_draw_x0 && x < g_draw_x1 && y >= g_draw_vis_top && y < g_draw_vis_bot)
-		blend_pixel(g_draw_pixels + y * GFX_LCD_WIDTH + x, level);
+		blend_pixel(g_draw_pixels + (ptrdiff_t)y * GFX_LCD_WIDTH + x, level);
 }
 
 static int draw_glyph(int x, int baseline, uint16_t code, TeX_Font font)
@@ -72,7 +72,7 @@ static int draw_glyph(int x, int baseline, uint16_t code, TeX_Font font)
 		unsigned int offset = (unsigned int)((row - y0) * glyph.width + left - x0);
 		const uint8_t* bits = glyph.pixels + offset / 4;
 		unsigned int part = offset % 4;
-		uint8_t* dst = g_draw_pixels + row * GFX_LCD_WIDTH + left;
+		uint8_t* dst = g_draw_pixels + (ptrdiff_t)row * GFX_LCD_WIDTH + left;
 
 		for (int col = left; col < right; ++col, ++dst)
 		{
@@ -108,7 +108,7 @@ static void rec_rule(int x, int y, int w)
 	int left = TEX_MAX(x, g_draw_x0);
 	int right = TEX_MIN(x + w, g_draw_x1);
 	if (left < right)
-		memset(g_draw_pixels + y * GFX_LCD_WIDTH + left, g_draw_palette[3], (size_t)(right - left));
+		memset(g_draw_pixels + (ptrdiff_t)y * GFX_LCD_WIDTH + left, g_draw_palette[3], (size_t)(right - left));
 }
 
 static void rec_line(int x1, int y1, int x2, int y2)

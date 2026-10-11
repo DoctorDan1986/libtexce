@@ -100,6 +100,9 @@ jobs:
           path: libtexce
           submodules: recursive
 
+      - name: Download CE Libraries v14.2
+        run: curl --fail --location https://github.com/CE-Programming/libraries/releases/download/v14.2/clibs.8xg --output libtexce/assets/clibs.8xg
+
       - name: Download CI test secrets
         uses: actions/checkout@v4
         with:
@@ -190,6 +193,9 @@ jobs:
         with:
           path: libtexce
           submodules: recursive
+
+      - name: Download CE Libraries Nightly
+        run: curl --fail --location https://github.com/CE-Programming/libraries/releases/download/nightly/clibs.8xg --output libtexce/assets/clibs.8xg
 
       - name: Download CI test secrets
         uses: actions/checkout@v4

@@ -15,7 +15,7 @@ static uint32_t draw_hash(TeX_Renderer* renderer, TeX_Layout* layout, int scroll
 	CHECK(tex_get_last_error(layout) == TEX_OK);
 
 	uint32_t hash = UINT32_C(2166136261);
-	for (size_t i = 0; i < GFX_LCD_WIDTH * GFX_LCD_HEIGHT; ++i)
+	for (size_t i = 0; i < (size_t)GFX_LCD_WIDTH * GFX_LCD_HEIGHT; ++i)
 	{
 		hash = (hash ^ gfx_vram[i]) * UINT32_C(16777619);
 	}
@@ -149,14 +149,14 @@ static void check_antialias_and_clipping(const TeX_Config* config)
 	gfx_FillScreen(113);
 	for (int row = 4; row < 37; ++row)
 	{
-		memset(gfx_vram + row * GFX_LCD_WIDTH + 7, config->palette[0], 91 - 7);
+		memset(gfx_vram + (ptrdiff_t)row * GFX_LCD_WIDTH + 7, config->palette[0], 91 - 7);
 	}
 	tex_draw(renderer, layout, 0, 0, 0);
 	for (int row = 0; row < GFX_LCD_HEIGHT; ++row)
 	{
 		for (int col = 0; col < GFX_LCD_WIDTH; ++col)
 		{
-			size_t pos = (size_t)(row * GFX_LCD_WIDTH + col);
+			size_t pos = (size_t)row * GFX_LCD_WIDTH + (size_t)col;
 			CHECK(gfx_vram[pos] == (row >= 4 && row < 37 && col >= 7 && col < 91 ? reference[pos] : 113));
 		}
 	}
@@ -224,9 +224,9 @@ static void check_script_delimiter_clearance(const TeX_Config* config)
 
 	UnifiedPool* pool = &renderer->pool;
 	Node* script = NULL;
-	for (NodeRef ref = 0; ref < pool->node_count; ++ref)
+	for (size_t ref = 0; ref < pool->node_count; ++ref)
 	{
-		Node* node = pool_get_node(pool, ref);
+		Node* node = pool_get_node(pool, (NodeRef)ref);
 		if (node->type == N_SCRIPT)
 		{
 			script = node;
@@ -303,10 +303,10 @@ static void check_text_ink_bounds(const TeX_Config* config)
 		RECORD = 9
 	};
 	size_t size = HEADER + GLYPHS * RECORD;
-	for (uint16_t code = 0; code < GLYPHS; ++code)
+	for (int code = 0; code < GLYPHS; ++code)
 	{
 		TexGlyph glyph;
-		if (tex_font_glyph(config->font_main, code, &glyph))
+		if (tex_font_glyph(config->font_main, (uint16_t)code, &glyph))
 		{
 			size += ((size_t)glyph.width * glyph.height + 3) / 4;
 		}
@@ -375,7 +375,7 @@ static void check_text_ink_bounds(const TeX_Config* config)
 		}
 
 		size_t actual_ink = 0;
-		for (size_t pixel = 0; pixel < GFX_LCD_WIDTH * GFX_LCD_HEIGHT; ++pixel)
+		for (size_t pixel = 0; pixel < (size_t)GFX_LCD_WIDTH * GFX_LCD_HEIGHT; ++pixel)
 		{
 			actual_ink += gfx_vram[pixel] != custom.palette[0];
 		}
@@ -531,7 +531,7 @@ int main(void)
 	char words[1001];
 	for (int i = 0; i < 200; ++i)
 	{
-		char* word = words + i * 5;
+		char* word = words + (size_t)i * 5;
 		word[0] = 'w';
 		word[1] = (char)('0' + i / 100);
 		word[2] = (char)('0' + i / 10 % 10);
