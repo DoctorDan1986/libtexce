@@ -58,6 +58,7 @@ static TexAtom atom_class(UnifiedPool* pool, const Node* node)
 	case (uint8_t)TEXFONT_ARROW_LEFT_CHAR:
 	case (uint8_t)TEXFONT_ELEMENT_OF_CHAR:
 	case (uint8_t)TEXFONT_SUBSET_OF_CHAR:
+	case (uint8_t)TEXFONT_SUPSET_CHAR:
 	case (uint8_t)TEXFONT_IMPLIES_CHAR:
 	case (uint8_t)TEXFONT_IFF_CHAR:
 		return TEX_ATOM_REL;

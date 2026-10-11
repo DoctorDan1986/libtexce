@@ -156,6 +156,7 @@
 - \\subset
 - \\subseteq
 - \\sum
+- \\supset
 - \\tau
 - \\therefore
 - \\theta
