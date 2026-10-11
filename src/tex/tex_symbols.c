@@ -157,6 +157,7 @@ static const MapEnt g_map[] = {
 	{ "subseteq", GL(TEXFONT_SUBSET_EQ_CHAR), SYM_GLYPH },
 	{ "sum", GL(TEXFONT_SUMMATION_CHAR), SYM_GLYPH },
 	{ "sup", SYMC_FUNC_SUP, SYM_FUNC },
+	{ "supset", GL(TEXFONT_SUPSET_CHAR), SYM_GLYPH },
 	{ "tan", SYMC_FUNC_TAN, SYM_FUNC },
 	{ "tanh", SYMC_FUNC_TANH, SYM_FUNC },
 	{ "tau", GL(TEXFONT_tau_CHAR), SYM_GLYPH },

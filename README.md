@@ -247,7 +247,7 @@ Highlights:
 - **Greek**: `\alpha` through `\omega`, `\Gamma` through `\Omega`
 - **Big operators**: `\int`, `\sum`, `\prod` with limits, plus `\iint`, `\iiint`, `\oint` variants
 - **Functions**: `\sin`, `\cos`, `\lim`, `\log`, `\exp`, `\det`, `\gcd`, and many more
-- **Boolean logic**: `\land` / `\wedge`, `\lor` / `\vee`, `\neg` / `\lnot`, `\Rightarrow` / `\implies`, `\Leftrightarrow` / `\iff`, `\top`, and `\bot`
+- **Boolean logic**: `\land` / `\wedge`, `\lor` / `\vee`, `\neg` / `\lnot`, `\Rightarrow` / `\implies`, `\Leftrightarrow` / `\iff`, `\supset` (horseshoe/superset), `\top`, and `\bot`
 - **Accents**: `\hat`, `\bar`, `\vec`, `\dot`, `\tilde`, `\overline`, `\underline`
 - **Decorations**: `\overbrace{...}^{label}`, `\underbrace{...}_{label}`
 - **Delimiters**: `\left( ... \right)` with auto-sizing for `()`, `[]`, `\{\}`, `||`, `\langle\rangle`, `\lfloor\rfloor`, `\lceil\rceil`

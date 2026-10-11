@@ -87,7 +87,7 @@ LOW_SYMBOLS = [
     0x2295,  # ⊕ Circled plus (oplus)
 ]
 
-# The Master Symbol List (0x80 - 0xC3()
+# The Master Symbol List (0x80 - 0xC4).
 SYMBOLS = [
     # Greek Lower
     0x03B1, 0x03B2, 0x03B3, 0x03B4, 0x03B5, 0x03B6, 0x03B7, 0x03B8,
@@ -109,6 +109,7 @@ SYMBOLS = [
     0x221A,
     # Boolean logic
     0x2227, 0x2228, 0x00AC, 0x21D2, 0x21D4, 0x22A4, 0x22A5,
+    0x2283,  # Superset / material-implication horseshoe (\supset)
 ]
 
 
