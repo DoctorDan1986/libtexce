@@ -293,7 +293,15 @@ static void test_math_spacing(void)
 		{ "x+", 2, {0, 0} },
 		{ "\\sin x", 2, {0, 1} },
 		{ "\\sin(x)", 4, {0, 0, 0, 0} },
-		{ "x,y", 3, {0, 0, 1} }
+		{ "x,y", 3, {0, 0, 1} },
+		{ "p\\land q", 3, {0, 1, 1} },
+		{ "p\\lor q", 3, {0, 1, 1} },
+		{ "\\neg p", 2, {0, 0} },
+		{ "p\\Rightarrow q", 3, {0, 1, 1} },
+		{ "p\\Leftrightarrow q", 3, {0, 1, 1} },
+		{ "p\\top q", 3, {0, 0, 0} },
+		{ "p\\bot q", 3, {0, 0, 0} },
+		{ "p\\perp q", 3, {0, 1, 1} }
 	};
 
 	UnifiedPool pool;
@@ -304,6 +312,7 @@ static void test_math_spacing(void)
 		TeX_Layout layout = {0};
 		NodeRef ref = tex_parse_math(cases[i].source, -1, &pool, &layout, false);
 		CHECK(ref != NODE_NULL);
+		CHECK(tex_get_last_error(&layout) == TEX_OK);
 		tex_measure_range(&pool, 0, (NodeRef)pool.node_count);
 
 		Node* root = pool_get_node(&pool, ref);
@@ -324,8 +333,9 @@ static void test_math_spacing(void)
 
 	pool_reset(&pool);
 	TeX_Layout layout = {0};
-	NodeRef ref = tex_parse_math("x_{a+b}", -1, &pool, &layout, false);
+	NodeRef ref = tex_parse_math("x_{p\\wedge q\\vee\\lnot r\\implies\\top\\iff\\bot}", -1, &pool, &layout, false);
 	CHECK(ref != NODE_NULL);
+	CHECK(tex_get_last_error(&layout) == TEX_OK);
 	tex_measure_range(&pool, 0, (NodeRef)pool.node_count);
 
 	Node* script = pool_get_node(&pool, list_first_item(&pool, pool_get_node(&pool, ref)->data.list.head));

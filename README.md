@@ -247,6 +247,7 @@ Highlights:
 - **Greek**: `\alpha` through `\omega`, `\Gamma` through `\Omega`
 - **Big operators**: `\int`, `\sum`, `\prod` with limits, plus `\iint`, `\iiint`, `\oint` variants
 - **Functions**: `\sin`, `\cos`, `\lim`, `\log`, `\exp`, `\det`, `\gcd`, and many more
+- **Boolean logic**: `\land` / `\wedge`, `\lor` / `\vee`, `\neg` / `\lnot`, `\Rightarrow` / `\implies`, `\Leftrightarrow` / `\iff`, `\top`, and `\bot`
 - **Accents**: `\hat`, `\bar`, `\vec`, `\dot`, `\tilde`, `\overline`, `\underline`
 - **Decorations**: `\overbrace{...}^{label}`, `\underbrace{...}_{label}`
 - **Delimiters**: `\left( ... \right)` with auto-sizing for `()`, `[]`, `\{\}`, `||`, `\langle\rangle`, `\lfloor\rfloor`, `\lceil\rceil`
@@ -255,6 +256,8 @@ Highlights:
 - **Text mode**: `\text{...}` for roman text within math
 
 Input uses standard LaTeX delimiters: `$...$` for inline math, `$$...$$` for display math (centered). everything outside `$` delimiters is rendered as plain text with automatic word wrapping
+
+Boolean logic symbols require the current `TeXFonts.8xv` and `TeXScrpt.8xv` AppVars
 
 ## Common Patterns
 
