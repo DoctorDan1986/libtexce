@@ -37,6 +37,9 @@ static TexAtom atom_class(UnifiedPool* pool, const Node* node)
 	case (uint8_t)TEXFONT_DIVIDE_CHAR:
 	case (uint8_t)TEXFONT_LOGICAL_AND_CHAR:
 	case (uint8_t)TEXFONT_LOGICAL_OR_CHAR:
+	case (uint8_t)TEXFONT_ARROW_UP_CHAR:
+	case (uint8_t)TEXFONT_ARROW_DOWN_CHAR:
+	case (uint8_t)TEXFONT_O_DOT_CHAR:
 		return TEX_ATOM_BIN;
 	case '=':
 	case '<':
